@@ -2162,12 +2162,17 @@ LibraryManager.library = {
 
   // Note: this is not used in STANDALONE_WASM mode, because it is more
   //       compact to do it in JS.
+#if 0
   strftime__deps: ['_isLeapYear', '_arraySum', '_addDays', '_MONTH_DAYS_REGULAR', '_MONTH_DAYS_LEAP'
 #if MINIMAL_RUNTIME
     , '$intArrayFromString', '$writeArrayToMemory'
 #endif
   ],
+#endif
   strftime: function(s, maxsize, format, tm) {
+#if 1
+    abort('strftime');
+#else
     // size_t strftime(char *restrict s, size_t maxsize, const char *restrict format, const struct tm *restrict timeptr);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/strftime.html
 
@@ -2483,18 +2488,24 @@ LibraryManager.library = {
 
     writeArrayToMemory(bytes, s);
     return bytes.length-1;
+#endif // 1 else
   },
   strftime_l__deps: ['strftime'],
   strftime_l: function(s, maxsize, format, tm) {
     return _strftime(s, maxsize, format, tm); // no locale support yet
   },
 
+#if 0
   strptime__deps: ['_isLeapYear', '_arraySum', '_addDays', '_MONTH_DAYS_REGULAR', '_MONTH_DAYS_LEAP', '$jstoi_q'
 #if MINIMAL_RUNTIME
     , '$intArrayFromString'
 #endif
   ],
+#endif
   strptime: function(buf, format, tm) {
+#if 1
+    abort('strptime');
+#else
     // char *strptime(const char *restrict buf, const char *restrict format, struct tm *restrict tm);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/strptime.html
     var pattern = UTF8ToString(format);
@@ -2733,6 +2744,7 @@ LibraryManager.library = {
     }
 
     return 0;
+#endif // 1 else
   },
   strptime_l__deps: ['strptime'],
   strptime_l: function(buf, format, tm) {
