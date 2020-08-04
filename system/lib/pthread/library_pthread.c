@@ -219,6 +219,7 @@ static void _do_call(em_queued_call* q) {
         pthread_create(q->args[0].vp, q->args[1].vp, q->args[2].vp, q->args[3].vp);
 #endif
       break;
+#if 0
     case EM_PROXIED_CREATE_CONTEXT:
       q->returnValue.i = emscripten_webgl_create_context(q->args[0].cp, q->args[1].vp);
       break;
@@ -226,6 +227,7 @@ static void _do_call(em_queued_call* q) {
       q->returnValue.i =
         emscripten_set_canvas_element_size(q->args[0].cp, q->args[1].i, q->args[2].i);
       break;
+#endif
     case EM_PROXIED_JS_FUNCTION:
       q->returnValue.d =
         emscripten_receive_on_main_thread_js((int)q->functionPtr, q->args[0].i, &q->args[1].d);
