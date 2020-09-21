@@ -548,29 +548,27 @@ a function,
 
   mergeInto(LibraryManager.library, {
     $method_support__postset: 'method_support();',
-    $method_support: {
-      init: function() {
-        var SomeLib = function() {
-          this.callCount = 0;
-        };
+    $method_support: function() {
+      var SomeLib = function() {
+        this.callCount = 0;
+      };
 
-        SomeLib.prototype.getCallCount = function() {
-          return this.callCount;
-        };
+      SomeLib.prototype.getCallCount = function() {
+        return this.callCount;
+      };
 
-        SomeLib.prototype.process = function() {
-          ++this.callCount;
-        };
+      SomeLib.prototype.process = function() {
+        ++this.callCount;
+      };
 
-        SomeLib.prototype.reset = function() {
-          this.callCount = 0;
-        };
+      SomeLib.prototype.reset = function() {
+        this.callCount = 0;
+      };
 
-        var inst = new SomeLib();
-        _method_01 = inst.getCallCount.bind(inst);
-        _method_02 = inst.process.bind(inst);
-        _method_03 = inst.reset.bind(inst);
-      }
+      var inst = new SomeLib();
+      _method_01 = inst.getCallCount.bind(inst);
+      _method_02 = inst.process.bind(inst);
+      _method_03 = inst.reset.bind(inst);
     },
     method_01: function() {},
     method_01__deps: ['$method_support'],
@@ -616,12 +614,8 @@ be called.
 
 See `test_add_function in tests/test_core.py`_ for an example.
 
-When using ``addFunction``, there is a backing array where these functions are
-stored. This array must be explicitly sized, which can be done via a
-compile-time setting, ``RESERVED_FUNCTION_POINTERS``. For example, to reserve
-space for 20 functions to be added::
-
-    emcc ... -s RESERVED_FUNCTION_POINTERS=20 ...
+You should build with ``-s ALLOW_TABLE_GROWTH`` to allow new functions to be
+added to the table. Otherwise by default the table has a fixed size.
 
 .. note:: When using ``addFunction`` on LLVM wasm backend, you need to provide
    an additional second argument, a Wasm function signature string. Each

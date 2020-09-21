@@ -12,7 +12,6 @@ import base64
 import difflib
 import json
 import logging
-import math
 import os
 import re
 import shutil
@@ -21,12 +20,8 @@ import time
 import sys
 import tempfile
 
-if sys.version_info < (2, 7, 0):
-  print('emscripten requires python 2.7.0 or above (python 2.7.12 or newer is recommended, older python versions are known to run into SSL related issues, https://github.com/emscripten-core/emscripten/issues/6275)', file=sys.stderr)
-  sys.exit(1)
-
-if sys.version_info[0] == 3 and sys.version_info < (3, 5):
-  print('emscripten requires at least python 3.5 (or python 2.7.12 or above)', file=sys.stderr)
+if sys.version_info < (3, 5):
+  print('error: emscripten requires python 3.5 or above', file=sys.stderr)
   sys.exit(1)
 
 from .toolchain_profiler import ToolchainProfiler
@@ -41,8 +36,10 @@ MACOS = sys.platform == 'darwin'
 LINUX = sys.platform.startswith('linux')
 DEBUG = int(os.environ.get('EMCC_DEBUG', '0'))
 EXPECTED_NODE_VERSION = (4, 1, 1)
-EXPECTED_BINARYEN_VERSION = 94
-SIMD_FEATURE_TOWER = ['-msse', '-msse2', '-msse3', '-mssse3', '-msse4.1', '-msse4.2', '-mavx']
+EXPECTED_BINARYEN_VERSION = 96
+EXPECTED_LLVM_VERSION = "12.0"
+SIMD_INTEL_FEATURE_TOWER = ['-msse', '-msse2', '-msse3', '-mssse3', '-msse4.1', '-msse4.2', '-mavx']
+SIMD_NEON_FLAGS = ['-mfpu=neon']
 
 # can add  %(asctime)s  to see timestamps
 logging.basicConfig(format='%(name)s:%(levelname)s: %(message)s',
@@ -55,7 +52,6 @@ if sys.version_info < (2, 7, 12):
 
 # warning about absolute-paths is disabled by default, and not enabled by -Wall
 diagnostics.add_warning('absolute-paths', enabled=False, part_of_all=False)
-diagnostics.add_warning('separate-asm')
 diagnostics.add_warning('almost-asm')
 diagnostics.add_warning('invalid-input')
 # Don't show legacy settings warnings by default
@@ -66,8 +62,9 @@ diagnostics.add_warning('emcc')
 diagnostics.add_warning('undefined', error=True)
 diagnostics.add_warning('deprecated')
 diagnostics.add_warning('version-check')
-diagnostics.add_warning('fastcomp')
+diagnostics.add_warning('export-main')
 diagnostics.add_warning('unused-command-line-argument', shared=True)
+diagnostics.add_warning('pthreads-mem-growth')
 
 
 def exit_with_error(msg, *args):
@@ -237,6 +234,7 @@ def run_js_tool(filename, jsargs=[], *args, **kw):
   implemented in javascript.
   """
   command = NODE_JS + [filename] + jsargs
+  print_compiler_stage(command)
   return check_call(command, *args, **kw).stdout
 
 
@@ -337,8 +335,6 @@ def parse_config_file():
 
   Also also EM_<KEY> environment variables to override specific config keys.
   """
-  global JS_ENGINES, JAVA, CLOSURE_COMPILER
-
   config = {}
   config_text = open(CONFIG_FILE, 'r').read() if CONFIG_FILE else EM_CONFIG
   try:
@@ -351,13 +347,13 @@ def parse_config_file():
     'BINARYEN_ROOT',
     'POPEN_WORKAROUND',
     'SPIDERMONKEY_ENGINE',
-    'EMSCRIPTEN_NATIVE_OPTIMIZER',
     'V8_ENGINE',
     'LLVM_ROOT',
     'LLVM_ADD_VERSION',
     'CLANG_ADD_VERSION',
     'CLOSURE_COMPILER',
     'JAVA',
+    'JS_ENGINE',
     'JS_ENGINES',
     'WASMER',
     'WASMTIME',
@@ -386,17 +382,65 @@ def parse_config_file():
   if not NODE_JS:
     exit_with_error('NODE_JS is not defined in %s', config_file_location())
 
+
+def listify(x):
+  if type(x) is not list:
+    return [x]
+  return x
+
+
+def fix_js_engine(old, new):
+  global JS_ENGINES
+  if old is None:
+    return
+  JS_ENGINES = [new if x == old else x for x in JS_ENGINES]
+  return new
+
+
+def get_npm_cmd(name):
+  if WINDOWS:
+    cmd = [path_from_root('node_modules', '.bin', name + '.cmd')]
+  else:
+    cmd = NODE_JS + [path_from_root('node_modules', '.bin', name)]
+  if not os.path.exists(cmd[-1]):
+    exit_with_error('%s was not found! Please run "npm install" in Emscripten root directory to set up npm dependencies' % name)
+  return cmd
+
+
+def normalize_config_settings():
+  global CACHE, PORTS, JAVA
+  global NODE_JS, V8_ENGINE, JS_ENGINE, JS_ENGINES, SPIDERMONKEY_ENGINE, WASM_ENGINES
+
   # EM_CONFIG stuff
   if not JS_ENGINES:
     JS_ENGINES = [NODE_JS]
+  if not JS_ENGINE:
+    JS_ENGINE = JS_ENGINES[0]
 
-  if CLOSURE_COMPILER is None:
-    if WINDOWS:
-      CLOSURE_COMPILER = [path_from_root('node_modules', '.bin', 'google-closure-compiler.cmd')]
+  # Engine tweaks
+  if SPIDERMONKEY_ENGINE:
+    new_spidermonkey = SPIDERMONKEY_ENGINE
+    if '-w' not in str(new_spidermonkey):
+      new_spidermonkey += ['-w']
+    SPIDERMONKEY_ENGINE = fix_js_engine(SPIDERMONKEY_ENGINE, new_spidermonkey)
+  NODE_JS = fix_js_engine(NODE_JS, listify(NODE_JS))
+  V8_ENGINE = fix_js_engine(V8_ENGINE, listify(V8_ENGINE))
+  JS_ENGINE = fix_js_engine(JS_ENGINE, listify(JS_ENGINE))
+  JS_ENGINES = [listify(engine) for engine in JS_ENGINES]
+  WASM_ENGINES = [listify(engine) for engine in WASM_ENGINES]
+  if not CACHE:
+    if root_is_writable():
+      CACHE = path_from_root('cache')
     else:
-      # Work around an issue that Closure compiler can take up a lot of memory and crash in an error
-      # "FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory"
-      CLOSURE_COMPILER = [NODE_JS, '--max_old_space_size=8192', path_from_root('node_modules', '.bin', 'google-closure-compiler')]
+      # Use the legacy method of putting the cache in the user's home directory
+      # if the emscripten root is not writable.
+      # This is useful mostly for read-only installation and perhaps could
+      # be removed in the future since such installations should probably be
+      # setting a specific cache location.
+      logger.debug('Using home-directory for emscripten cache due to read-only root')
+      CACHE = os.path.expanduser(os.path.join('~', '.emscripten_cache'))
+  if not PORTS:
+    PORTS = os.path.join(CACHE, 'ports')
 
   if JAVA is None:
     logger.debug('JAVA not defined in ' + config_file_location() + ', using "java"')
@@ -413,27 +457,6 @@ def config_file_location():
   return CONFIG_FILE
 
 
-def listify(x):
-  if type(x) is not list:
-    return [x]
-  return x
-
-
-def fix_js_engine(old, new):
-  if old is None:
-    return
-  global JS_ENGINES
-  JS_ENGINES = [new if x == old else x for x in JS_ENGINES]
-  return new
-
-
-def expected_llvm_version():
-  if get_llvm_target() == WASM_TARGET:
-    return "12.0"
-  else:
-    return "6.0"
-
-
 def get_clang_version():
   if not hasattr(get_clang_version, 'found_version'):
     if not os.path.exists(CLANG_CC):
@@ -445,11 +468,10 @@ def get_clang_version():
 
 
 def check_llvm_version():
-  expected = expected_llvm_version()
   actual = get_clang_version()
-  if expected in actual:
+  if EXPECTED_LLVM_VERSION in actual:
     return True
-  diagnostics.warning('version-check', 'LLVM version appears incorrect (seeing "%s", expected "%s")', actual, expected)
+  diagnostics.warning('version-check', 'LLVM version appears incorrect (seeing "%s", expected "%s")', actual, EXPECTED_LLVM_VERSION)
   return False
 
 
@@ -466,30 +488,14 @@ def get_llc_targets():
   return targets
 
 
-def has_asm_js_target(targets):
-  return 'js' in targets and 'JavaScript (asm.js, emscripten) backend' in targets
-
-
-def has_wasm_target(targets):
-  return 'wasm32' in targets and 'WebAssembly 32-bit' in targets
-
-
 def check_llvm():
   targets = get_llc_targets()
-  if not Settings.WASM_BACKEND:
-    if not has_asm_js_target(targets):
-      logger.critical('fastcomp in use, but LLVM has not been built with the JavaScript backend as a target, llc reports:')
-      print('===========================================================================', file=sys.stderr)
-      print(targets, file=sys.stderr)
-      print('===========================================================================', file=sys.stderr)
-      return False
-  else:
-    if not has_wasm_target(targets):
-      logger.critical('WebAssembly set as target, but LLVM has not been built with the WebAssembly backend, llc reports:')
-      print('===========================================================================', file=sys.stderr)
-      print(targets, file=sys.stderr)
-      print('===========================================================================', file=sys.stderr)
-      return False
+  if 'wasm32' not in targets and 'WebAssembly 32-bit' not in targets:
+    logger.critical('LLVM has not been built with the WebAssembly backend, llc reports:')
+    print('===========================================================================', file=sys.stderr)
+    print(targets, file=sys.stderr)
+    print('===========================================================================', file=sys.stderr)
+    return False
 
   return True
 
@@ -553,7 +559,7 @@ def perform_sanify_checks():
       exit_with_error('The configured node executable (%s) does not seem to work, check the paths in %s (%s)', NODE_JS, config_file_location, str(e))
 
   with ToolchainProfiler.profile_block('sanity LLVM'):
-    for cmd in [CLANG_CC, LLVM_AR, LLVM_AS, LLVM_NM]:
+    for cmd in [CLANG_CC, LLVM_AR, LLVM_NM]:
       if not os.path.exists(cmd) and not os.path.exists(cmd + '.exe'):  # .exe extension required for Windows
         exit_with_error('Cannot find %s, check the paths in %s', cmd, EM_CONFIG)
 
@@ -717,64 +723,7 @@ def apply_configuration():
   TEMP_DIR = configuration.TEMP_DIR
 
 
-def check_vanilla():
-  global LLVM_TARGET
-  # if the env var tells us what to do, do that
-  if 'EMCC_WASM_BACKEND' in os.environ:
-    if os.environ['EMCC_WASM_BACKEND'] != '0':
-      logger.debug('EMCC_WASM_BACKEND tells us to use wasm backend')
-      LLVM_TARGET = WASM_TARGET
-    else:
-      logger.debug('EMCC_WASM_BACKEND tells us to use asm.js backend')
-      LLVM_TARGET = ASM_JS_TARGET
-  else:
-    # if we are using vanilla LLVM, i.e. we don't have our asm.js backend, then we
-    # must use wasm (or at least try to). to know that, we have to run llc to
-    # see which backends it has. we cache this result.
-
-    def has_vanilla_targets():
-      logger.debug('testing for asm.js target, because if not present (i.e. this is plain vanilla llvm, not emscripten fastcomp), we will use the wasm target instead (set EMCC_WASM_BACKEND to skip this check)')
-      targets = get_llc_targets()
-      return has_wasm_target(targets) and not has_asm_js_target(targets)
-
-    def get_vanilla_file():
-      logger.debug('regenerating vanilla file: %s' % LLVM_ROOT)
-      saved_file = Cache.get_path('is_vanilla.txt', root=True)
-      if os.path.exists(saved_file):
-        logger.debug('old: %s\n' % open(saved_file).read())
-      open(saved_file, 'w').write(('1' if has_vanilla_targets() else '0') + ':' + LLVM_ROOT + '\n')
-      return saved_file
-
-    is_vanilla_file = Cache.get('is_vanilla.txt', get_vanilla_file, root=True)
-    if CONFIG_FILE and os.path.getmtime(CONFIG_FILE) > os.path.getmtime(is_vanilla_file):
-      logger.debug('config file changed since we checked vanilla; re-checking')
-      is_vanilla_file = Cache.get('is_vanilla.txt', get_vanilla_file, force=True, root=True)
-    try:
-      contents = open(is_vanilla_file).read().strip()
-      middle = contents.index(':')
-      is_vanilla = int(contents[:middle])
-      llvm_used = contents[middle + 1:]
-      if llvm_used != LLVM_ROOT:
-        logger.debug('regenerating vanilla check since other llvm (%s vs %s)`', llvm_used, LLVM_ROOT)
-        Cache.get('is_vanilla.txt', get_vanilla_file, force=True, root=True)
-        is_vanilla = has_vanilla_targets()
-    except Exception as e:
-      logger.debug('failed to use vanilla file, will re-check: ' + str(e))
-      is_vanilla = has_vanilla_targets()
-    if is_vanilla:
-      logger.debug('check tells us to use wasm backend')
-      LLVM_TARGET = WASM_TARGET
-    else:
-      logger.debug('check tells us to use asm.js backend')
-      LLVM_TARGET = ASM_JS_TARGET
-
-  if LLVM_TARGET == WASM_TARGET:
-    Settings.WASM_BACKEND = 1
-    reconfigure_cache()
-
-
 def get_llvm_target():
-  assert LLVM_TARGET is not None
   return LLVM_TARGET
 
 
@@ -814,6 +763,7 @@ def emsdk_cflags(user_args, cxx):
     path_from_root('system', 'lib', 'libc', 'musl', 'arch', 'emscripten'),
     path_from_root('system', 'local', 'include'),
     path_from_root('system', 'include', 'SSE'),
+    path_from_root('system', 'include', 'neon'),
     path_from_root('system', 'lib', 'compiler-rt', 'include'),
     path_from_root('system', 'lib', 'libunwind', 'include'),
     Cache.get_path('include')
@@ -835,28 +785,31 @@ def emsdk_cflags(user_args, cxx):
       if n in hay:
         return True
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER) or array_contains_any_of(user_args, SIMD_NEON_FLAGS):
     if '-msimd128' not in user_args:
-      exit_with_error('Passing any of ' + ', '.join(SIMD_FEATURE_TOWER) + ' flags also requires passing -msimd128!')
+      exit_with_error('Passing any of ' + ', '.join(SIMD_INTEL_FEATURE_TOWER + SIMD_NEON_FLAGS) + ' flags also requires passing -msimd128!')
     c_opts += ['-D__SSE__=1']
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER[1:]):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER[1:]):
     c_opts += ['-D__SSE2__=1']
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER[2:]):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER[2:]):
     c_opts += ['-D__SSE3__=1']
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER[3:]):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER[3:]):
     c_opts += ['-D__SSSE3__=1']
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER[4:]):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER[4:]):
     c_opts += ['-D__SSE4_1__=1']
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER[5:]):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER[5:]):
     c_opts += ['-D__SSE4_2__=1']
 
-  if array_contains_any_of(user_args, SIMD_FEATURE_TOWER[6:]):
+  if array_contains_any_of(user_args, SIMD_INTEL_FEATURE_TOWER[6:]):
     c_opts += ['-D__AVX__=1']
+
+  if array_contains_any_of(user_args, SIMD_NEON_FLAGS):
+    c_opts += ['-D__ARM_NEON__=1']
 
   # libcxx include paths must be defined before libc's include paths otherwise libcxx will not build
   if cxx:
@@ -864,7 +817,7 @@ def emsdk_cflags(user_args, cxx):
   return c_opts + include_directive(c_include_paths)
 
 
-def get_asmflags(user_args):
+def get_asmflags():
   return ['-target', get_llvm_target()]
 
 
@@ -878,11 +831,10 @@ def get_cflags(user_args, cxx):
             '-D__EMSCRIPTEN_tiny__=' + str(EMSCRIPTEN_VERSION_TINY),
             '-D_LIBCPP_ABI_VERSION=2']
 
-  if get_llvm_target() == WASM_TARGET:
-    # wasm target does not automatically define emscripten stuff, so do it here.
-    c_opts += ['-Dunix',
-               '-D__unix',
-               '-D__unix__']
+  # For compatability with the fastcomp compiler that defined these
+  c_opts += ['-Dunix',
+             '-D__unix',
+             '-D__unix__']
 
   # Changes to default clang behavior
 
@@ -972,9 +924,7 @@ class SettingsManager(object):
     @classmethod
     def apply_opt_level(cls, opt_level, shrink_level=0, noisy=False):
       if opt_level >= 1:
-        cls.attrs['ASM_JS'] = 1
         cls.attrs['ASSERTIONS'] = 0
-        cls.attrs['ALIASING_FUNCTION_POINTERS'] = 1
       if shrink_level >= 2:
         cls.attrs['EVAL_CTORS'] = 1
 
@@ -1053,31 +1003,18 @@ class SettingsManager(object):
 
 
 def verify_settings():
-  if Settings.ASM_JS not in [1, 2]:
-    exit_with_error('emcc: ASM_JS can only be set to either 1 or 2')
-
   if Settings.SAFE_HEAP not in [0, 1]:
     exit_with_error('emcc: SAFE_HEAP must be 0 or 1 in fastcomp')
 
-  if Settings.WASM and Settings.EXPORT_FUNCTION_TABLES:
-      exit_with_error('emcc: EXPORT_FUNCTION_TABLES incompatible with WASM')
-
-  if Settings.WASM_BACKEND:
-    if not Settings.WASM:
-      # When the user requests non-wasm output, we enable wasm2js. that is,
-      # we still compile to wasm normally, but we compile the final output
-      # to js.
-      Settings.WASM = 1
-      Settings.WASM2JS = 1
-    if Settings.WASM == 2:
-      # Requesting both Wasm and Wasm2JS support
-      Settings.WASM2JS = 1
-
-    if Settings.CYBERDWARF:
-      exit_with_error('emcc: CYBERDWARF is not supported by the LLVM wasm backend')
-
-    if Settings.EMULATED_FUNCTION_POINTERS:
-      exit_with_error('emcc: EMULATED_FUNCTION_POINTERS is not meaningful with the wasm backend.')
+  if not Settings.WASM:
+    # When the user requests non-wasm output, we enable wasm2js. that is,
+    # we still compile to wasm normally, but we compile the final output
+    # to js.
+    Settings.WASM = 1
+    Settings.WASM2JS = 1
+  if Settings.WASM == 2:
+    # Requesting both Wasm and Wasm2JS support
+    Settings.WASM2JS = 1
 
 
 def print_compiler_stage(cmd):
@@ -1129,17 +1066,9 @@ def reconfigure_cache():
 class FilenameReplacementStrings:
   WASM_TEXT_FILE = '{{{ FILENAME_REPLACEMENT_STRINGS_WASM_TEXT_FILE }}}'
   WASM_BINARY_FILE = '{{{ FILENAME_REPLACEMENT_STRINGS_WASM_BINARY_FILE }}}'
-  ASMJS_CODE_FILE = '{{{ FILENAME_REPLACEMENT_STRINGS_ASMJS_CODE_FILE }}}'
 
 
 class JS(object):
-  memory_initializer_pattern = r'/\* memory initializer \*/ allocate\(\[([\d, ]*)\], "i8", ALLOC_NONE, ([\d+\.GLOBAL_BASEHgb]+)\);'
-  no_memory_initializer_pattern = r'/\* no memory initializer \*/'
-
-  memory_staticbump_pattern = r'STATICTOP = STATIC_BASE \+ (\d+);'
-
-  global_initializers_pattern = r'/\* global initializers \*/ __ATINIT__.push\((.+)\);'
-
   emscripten_license = '''\
 /**
  * @license
@@ -1157,7 +1086,7 @@ class JS(object):
   #   Copyright 2017 The Emscripten Authors
   #   SPDX-License-Identifier: MIT
   #  */
-  emscripten_license_regex = '''\/\*\*?(\s*\*?\s*@license)?(\s*\*?\s*Copyright \d+ The Emscripten Authors\s*\*?\s*SPDX-License-Identifier: MIT)+\s*\*\/''' # noqa
+  emscripten_license_regex = r'\/\*\*?(\s*\*?\s*@license)?(\s*\*?\s*Copyright \d+ The Emscripten Authors\s*\*?\s*SPDX-License-Identifier: MIT)+\s*\*\/'
 
   @staticmethod
   def handle_license(js_target):
@@ -1202,7 +1131,7 @@ class JS(object):
     settings = settings or Settings
     if sig == 'i':
       return '0'
-    elif sig == 'f' and settings.get('PRECISE_F32'):
+    elif sig == 'f':
       return 'Math_fround(0)'
     elif sig == 'j':
       if settings:
@@ -1222,7 +1151,7 @@ class JS(object):
       return value + '|0'
     if sig in JS.FLOAT_SIGS and convert_from == 'i':
       value = '(' + value + '|0)'
-    if sig == 'f' and settings.get('PRECISE_F32'):
+    if sig == 'f':
       if ffi_arg:
         return '+Math_fround(' + value + ')'
       elif ffi_result:
@@ -1275,28 +1204,34 @@ function jsCall_%s(index%s) {
     return ret
 
   @staticmethod
-  def make_dynCall(sig):
-    # Optimize dynCall accesses in the case when not building with dynamic
-    # linking enabled.
-    if not Settings.MAIN_MODULE and not Settings.SIDE_MODULE:
-      return 'dynCall_' + sig
+  def make_dynCall(sig, args):
+    # wasm2c and asyncify are not yet compatible with direct wasm table calls
+    if Settings.USE_LEGACY_DYNCALLS or not JS.is_legal_sig(sig):
+      args = ','.join(args)
+      if not Settings.MAIN_MODULE and not Settings.SIDE_MODULE:
+        # Optimize dynCall accesses in the case when not building with dynamic
+        # linking enabled.
+        return 'dynCall_%s(%s)' % (sig, args)
+      else:
+        return 'Module["dynCall_%s"](%s)' % (sig, args)
     else:
-      return 'Module["dynCall_' + sig + '"]'
+      return 'wasmTable.get(%s)(%s)' % (args[0], ','.join(args[1:]))
 
   @staticmethod
   def make_invoke(sig, named=True):
     legal_sig = JS.legalize_sig(sig) # TODO: do this in extcall, jscall?
-    args = ','.join(['a' + str(i) for i in range(1, len(legal_sig))])
-    args = 'index' + (',' if args else '') + args
+    args = ['index'] + ['a' + str(i) for i in range(1, len(legal_sig))]
     ret = 'return ' if sig[0] != 'v' else ''
-    body = '%s%s(%s);' % (ret, JS.make_dynCall(sig), args)
+    body = '%s%s;' % (ret, JS.make_dynCall(sig, args))
     # C++ exceptions are numbers, and longjmp is a string 'longjmp'
     if Settings.SUPPORT_LONGJMP:
       rethrow = "if (e !== e+0 && e !== 'longjmp') throw e;"
     else:
       rethrow = "if (e !== e+0) throw e;"
 
-    ret = '''function%s(%s) {
+    name = (' invoke_' + sig) if named else ''
+    ret = '''\
+function%s(%s) {
   var sp = stackSave();
   try {
     %s
@@ -1305,7 +1240,8 @@ function jsCall_%s(index%s) {
     %s
     _setThrew(1, 0);
   }
-}''' % ((' invoke_' + sig) if named else '', args, body, rethrow)
+}''' % (name, ','.join(args), body, rethrow)
+
     return ret
 
   @staticmethod
@@ -1351,148 +1287,6 @@ function jsCall_%s(index%s) {
     return name.startswith('FUNCTION_TABLE_')
 
 
-class WebAssembly(object):
-  @staticmethod
-  def toLEB(x):
-    assert x >= 0, 'TODO: signed'
-    ret = []
-    while 1:
-      byte = x & 127
-      x >>= 7
-      more = x != 0
-      if more:
-        byte = byte | 128
-      ret.append(byte)
-      if not more:
-        break
-    return bytearray(ret)
-
-  @staticmethod
-  def readLEB(buf, offset):
-    result = 0
-    shift = 0
-    while True:
-      byte = bytearray(buf[offset:offset + 1])[0]
-      offset += 1
-      result |= (byte & 0x7f) << shift
-      if not (byte & 0x80):
-        break
-      shift += 7
-    return (result, offset)
-
-  @staticmethod
-  def add_emscripten_metadata(js_file, wasm_file):
-    WASM_PAGE_SIZE = 65536
-
-    mem_size = Settings.INITIAL_MEMORY // WASM_PAGE_SIZE
-    table_size = Settings.WASM_TABLE_SIZE
-    global_base = Settings.GLOBAL_BASE
-
-    js = open(js_file).read()
-    if Settings.WASM_BACKEND:
-      tempdouble_ptr = 0
-    else:
-      m = re.search(r"(^|\s)tempDoublePtr\s+=\s+(\d+)", js)
-      tempdouble_ptr = int(m.group(2))
-    m = re.search(r"(^|\s)DYNAMIC_BASE\s+=\s+(\d+)", js)
-    dynamic_base = int(m.group(2))
-    m = re.search(r"(^|\s)DYNAMICTOP_PTR\s+=\s+(\d+)", js)
-    dynamictop_ptr = int(m.group(2))
-
-    logger.debug('creating wasm emscripten metadata section with mem size %d, table size %d' % (mem_size, table_size,))
-    name = b'\x13emscripten_metadata' # section name, including prefixed size
-    contents = (
-      # metadata section version
-      WebAssembly.toLEB(EMSCRIPTEN_METADATA_MAJOR) +
-      WebAssembly.toLEB(EMSCRIPTEN_METADATA_MINOR) +
-
-      # NB: The structure of the following should only be changed
-      #     if EMSCRIPTEN_METADATA_MAJOR is incremented
-      # Minimum ABI version
-      WebAssembly.toLEB(EMSCRIPTEN_ABI_MAJOR) +
-      WebAssembly.toLEB(EMSCRIPTEN_ABI_MINOR) +
-
-      WebAssembly.toLEB(int(Settings.WASM_BACKEND)) +
-      WebAssembly.toLEB(mem_size) +
-      WebAssembly.toLEB(table_size) +
-      WebAssembly.toLEB(global_base) +
-      WebAssembly.toLEB(dynamic_base) +
-      WebAssembly.toLEB(dynamictop_ptr) +
-      WebAssembly.toLEB(tempdouble_ptr) +
-      WebAssembly.toLEB(int(Settings.STANDALONE_WASM))
-
-      # NB: more data can be appended here as long as you increase
-      #     the EMSCRIPTEN_METADATA_MINOR
-    )
-
-    orig = open(wasm_file, 'rb').read()
-    with open(wasm_file, 'wb') as f:
-      f.write(orig[0:8]) # copy magic number and version
-      # write the special section
-      f.write(b'\0') # user section is code 0
-      # need to find the size of this section
-      size = len(name) + len(contents)
-      f.write(WebAssembly.toLEB(size))
-      f.write(name)
-      f.write(contents)
-      f.write(orig[8:])
-
-  @staticmethod
-  def add_dylink_section(wasm_file, needed_dynlibs):
-    # a wasm shared library has a special "dylink" section, see tools-conventions repo
-    assert not Settings.WASM_BACKEND
-    mem_align = Settings.MAX_GLOBAL_ALIGN
-    mem_size = Settings.STATIC_BUMP
-    table_size = Settings.WASM_TABLE_SIZE
-    mem_align = int(math.log(mem_align, 2))
-    logger.debug('creating wasm dynamic library with mem size %d, table size %d, align %d' % (mem_size, table_size, mem_align))
-
-    # Write new wasm binary with 'dylink' section
-    wasm = open(wasm_file, 'rb').read()
-    section_name = b"\06dylink" # section name, including prefixed size
-    contents = (WebAssembly.toLEB(mem_size) + WebAssembly.toLEB(mem_align) +
-                WebAssembly.toLEB(table_size) + WebAssembly.toLEB(0))
-
-    # we extend "dylink" section with information about which shared libraries
-    # our shared library needs. This is similar to DT_NEEDED entries in ELF.
-    #
-    # In theory we could avoid doing this, since every import in wasm has
-    # "module" and "name" attributes, but currently emscripten almost always
-    # uses just "env" for "module". This way we have to embed information about
-    # required libraries for the dynamic linker somewhere, and "dylink" section
-    # seems to be the most relevant place.
-    #
-    # Binary format of the extension:
-    #
-    #   needed_dynlibs_count        varuint32       ; number of needed shared libraries
-    #   needed_dynlibs_entries      dynlib_entry*   ; repeated dynamic library entries as described below
-    #
-    # dynlib_entry:
-    #
-    #   dynlib_name_len             varuint32       ; length of dynlib_name_str in bytes
-    #   dynlib_name_str             bytes           ; name of a needed dynamic library: valid UTF-8 byte sequence
-    #
-    # a proposal has been filed to include the extension into "dylink" specification:
-    # https://github.com/WebAssembly/tool-conventions/pull/77
-    contents += WebAssembly.toLEB(len(needed_dynlibs))
-    for dyn_needed in needed_dynlibs:
-      dyn_needed = bytes(asbytes(dyn_needed))
-      contents += WebAssembly.toLEB(len(dyn_needed))
-      contents += dyn_needed
-
-    section_size = len(section_name) + len(contents)
-    with open(wasm_file, 'wb') as f:
-      # copy magic number and version
-      f.write(wasm[0:8])
-      # write the special section
-      f.write(b'\0') # user section is code 0
-      f.write(WebAssembly.toLEB(section_size))
-      f.write(section_name)
-      f.write(contents)
-      # copy rest of binary
-      f.write(wasm[8:])
-
-
 # Python 2-3 compatibility helper function:
 # Converts a string to the native str type.
 def asstr(s):
@@ -1509,6 +1303,11 @@ def asbytes(s):
     # Do not attempt to encode bytes
     return s
   return s.encode('utf-8')
+
+
+def suffix(name):
+  """Return the file extension"""
+  return os.path.splitext(name)[1]
 
 
 def unsuffixed(name):
@@ -1574,39 +1373,6 @@ def read_and_preprocess(filename, expand_macros=False):
   out = open(stdout, 'r').read()
 
   return out
-
-
-# Generates a suitable fetch-worker.js script from the given input source JS file (which is an asm.js build output),
-# and writes it out to location output_file. fetch-worker.js is the root entry point for a dedicated filesystem web
-# worker in -s ASMFS=1 mode.
-def make_fetch_worker(source_file, output_file):
-  src = open(source_file, 'r').read()
-  funcs_to_import = ['alignUp', '_emscripten_get_heap_size', '_emscripten_resize_heap', 'stringToUTF8', 'UTF8ToString', 'UTF8ArrayToString', 'intArrayFromString', 'lengthBytesUTF8', 'stringToUTF8Array', '_emscripten_is_main_browser_thread', '_emscripten_futex_wait', '_emscripten_get_sbrk_ptr']
-  asm_funcs_to_import = ['_malloc', '_free', '_sbrk', '___pthread_mutex_lock', '___pthread_mutex_unlock', '_pthread_mutexattr_init', '_pthread_mutex_init']
-  function_prologue = '''this.onerror = function(e) {
-  console.error(e);
-}
-
-'''
-  asm_start = src.find('// EMSCRIPTEN_START_ASM')
-  for func in funcs_to_import + asm_funcs_to_import:
-    loc = src.find('function ' + func + '(', asm_start if func in asm_funcs_to_import else 0)
-    if loc == -1:
-      exit_with_error('failed to find function %s!', func)
-    end_loc = src.find('{', loc) + 1
-    nesting_level = 1
-    while nesting_level > 0:
-      if src[end_loc] == '{':
-        nesting_level += 1
-      if src[end_loc] == '}':
-        nesting_level -= 1
-      end_loc += 1
-
-    func_code = src[loc:end_loc]
-    function_prologue = function_prologue + '\n' + func_code
-
-  fetch_worker_src = function_prologue + '\n' + read_and_preprocess(path_from_root('src', 'fetch-worker.js'), expand_macros=True)
-  open(output_file, 'w').write(fetch_worker_src)
 
 
 # ============================================================================
@@ -1697,8 +1463,8 @@ LLVM_ROOT = None
 LLVM_ADD_VERSION = None
 CLANG_ADD_VERSION = None
 CLOSURE_COMPILER = None
-EMSCRIPTEN_NATIVE_OPTIMIZER = None
 JAVA = None
+JS_ENGINE = None
 JS_ENGINES = []
 WASMER = None
 WASMTIME = None
@@ -1722,29 +1488,7 @@ else:
     exit_with_error('emscripten config file not found: ' + CONFIG_FILE)
 
 parse_config_file()
-# Engine tweaks
-if SPIDERMONKEY_ENGINE:
-  new_spidermonkey = SPIDERMONKEY_ENGINE
-  if '-w' not in str(new_spidermonkey):
-    new_spidermonkey += ['-w']
-  SPIDERMONKEY_ENGINE = fix_js_engine(SPIDERMONKEY_ENGINE, new_spidermonkey)
-NODE_JS = fix_js_engine(NODE_JS, listify(NODE_JS))
-V8_ENGINE = fix_js_engine(V8_ENGINE, listify(V8_ENGINE))
-JS_ENGINES = [listify(engine) for engine in JS_ENGINES]
-WASM_ENGINES = [listify(engine) for engine in WASM_ENGINES]
-if not CACHE:
-  if root_is_writable():
-    CACHE = path_from_root('cache')
-  else:
-    # Use the legacy method of putting the cache in the user's home directory
-    # if the emscripten root is not writable.
-    # This is useful mostly for read-only installation and perhaps could
-    # be removed in the future since such installations should probably be
-    # setting a specific cache location.
-    logger.debug('Using home-directory for emscripten cache due to read-only root')
-    CACHE = os.path.expanduser(os.path.join('~', '.emscripten_cache'))
-if not PORTS:
-  PORTS = os.path.join(CACHE, 'ports')
+normalize_config_settings()
 
 # Install our replacement Popen handler if we are running on Windows to avoid
 # python spawn process function.
@@ -1769,22 +1513,6 @@ TRACK_PROCESS_SPAWNS = EM_BUILD_VERBOSE >= 3
 
 set_version_globals()
 
-# For the Emscripten-specific WASM metadata section, follows semver, changes
-# whenever metadata section changes structure.
-# NB: major version 0 implies no compatibility
-# NB: when changing the metadata format, we should only append new fields, not
-#     reorder, modify, or remove existing ones.
-EMSCRIPTEN_METADATA_MAJOR, EMSCRIPTEN_METADATA_MINOR = (0, 3)
-# For the JS/WASM ABI, specifies the minimum ABI version required of
-# the WASM runtime implementation by the generated WASM binary. It follows
-# semver and changes whenever C types change size/signedness or
-# syscalls change signature. By semver, the maximum ABI version is
-# implied to be less than (EMSCRIPTEN_ABI_MAJOR + 1, 0). On an ABI
-# change, increment EMSCRIPTEN_ABI_MINOR if EMSCRIPTEN_ABI_MAJOR == 0
-# or the ABI change is backwards compatible, otherwise increment
-# EMSCRIPTEN_ABI_MAJOR and set EMSCRIPTEN_ABI_MINOR = 0.
-EMSCRIPTEN_ABI_MAJOR, EMSCRIPTEN_ABI_MINOR = (0, 26)
-
 # Tools/paths
 if LLVM_ADD_VERSION is None:
   LLVM_ADD_VERSION = os.getenv('LLVM_ADD_VERSION')
@@ -1798,8 +1526,6 @@ LLVM_LINK = build_llvm_tool_path(exe_suffix('llvm-link'))
 LLVM_AR = build_llvm_tool_path(exe_suffix('llvm-ar'))
 LLVM_RANLIB = build_llvm_tool_path(exe_suffix('llvm-ranlib'))
 LLVM_OPT = os.path.expanduser(build_llvm_tool_path(exe_suffix('opt')))
-LLVM_AS = os.path.expanduser(build_llvm_tool_path(exe_suffix('llvm-as')))
-LLVM_DIS = os.path.expanduser(build_llvm_tool_path(exe_suffix('llvm-dis')))
 LLVM_NM = os.path.expanduser(build_llvm_tool_path(exe_suffix('llvm-nm')))
 LLVM_INTERPRETER = os.path.expanduser(build_llvm_tool_path(exe_suffix('lli')))
 LLVM_COMPILER = os.path.expanduser(build_llvm_tool_path(exe_suffix('llc')))
@@ -1811,21 +1537,15 @@ EMCC = bat_suffix(path_from_root('emcc'))
 EMXX = bat_suffix(path_from_root('em++'))
 EMAR = bat_suffix(path_from_root('emar'))
 EMRANLIB = bat_suffix(path_from_root('emranlib'))
-AUTODEBUGGER = path_from_root('tools', 'autodebugger.py')
 FILE_PACKAGER = path_from_root('tools', 'file_packager.py')
 
 apply_configuration()
 
 # Target choice.
-ASM_JS_TARGET = 'asmjs-unknown-emscripten'
-WASM_TARGET = 'wasm32-unknown-emscripten'
+LLVM_TARGET = 'wasm32-unknown-emscripten'
 
 Settings = SettingsManager()
 verify_settings()
 Cache = cache.Cache(CACHE)
-check_vanilla()
 
 PRINT_STAGES = int(os.getenv('EMCC_VERBOSE', '0'))
-
-# compatibility with existing emcc, etc. scripts
-chunkify = cache.chunkify

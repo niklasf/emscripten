@@ -84,8 +84,6 @@ Emscripten compiler output often consists of several files and not just one. The
  - `emcc ... -o output.bc` does not produce a final asm.js/wasm build, but stops at LLVM bitcode generation stage, and produces a single LLVM bitcode file `output.bc`. Likewise only one bitcode file is produced if output suffix is `.ll`, `.o`, '.obj', '.lo', `.lib`, `.dylib` or `.so`.
  - `emcc ... -o output.a` generates a single archive file `output.a`.
  - `emcc ... -o output.{html,js} -s WASM=0` causes the compiler to target asm.js, and therefore a `.wasm` file is not produced.
- - `emcc ... -o output.{html,js} -s WASM=0 --separate-asm` likewise targets asm.js, but splits up the generated code to two files, `output.js` and `output.asm.js`.
- - `emcc ... -o output.html -s WASM=0 -s PRECISE_F32=2` (combination of targeting .html, asm.js and PRECISE_F32=2) implies as if `--separate-asm` was passed, so also produces `output.asm.js`.
  - `emcc ... -o output.{html,js} --emit-symbol-map` produces a file `output.{html,js}.symbols` if WebAssembly is being targeted (`-s WASM=0` not specified), or if asm.js is being targeted and `-Os`, `-Oz` or `-O2` or higher is specified, but debug level setting is `-g1` or lower (i.e. if symbols minification did occur).
  - `emcc ... -o output.{html,js} -s WASM=0 --memory-init-file 1` causes the generation of `output.{html,js}.mem` memory initializer file. Pasing `-O2`, `-Os` or `-Oz` also implies `--memory-init-file 1`.
  - `emcc ... -o output.{html,js} -g4` generates a source map file `output.wasm.map`. If targeting asm.js with `-s WASM=0`, the filename is `output.{html,js}.map`.
@@ -208,6 +206,13 @@ You should see some notifications about SDL2 being used, and built if it wasn't 
 .. note:: *SDL_net* has also been added to ports, use it with ``-s USE_SDL_NET=2``. To see a list of all available ports, run ``emcc --show-ports``.
 
 .. note:: Emscripten also has support for older SDL1, which is built-in. If you do not specify SDL2 as in the command above, then SDL1 is linked in and the SDL1 include paths are used. SDL1 has support for *sdl-config*, which is present in `system/bin <https://github.com/emscripten-core/emscripten/blob/master/system/bin/sdl-config>`_. Using the native *sdl-config* may result in compilation or missing-symbol errors. You will need to modify the build system to look for files in **emscripten/system** or **emscripten/system/bin** in order to use the Emscripten *sdl-config*.
+
+.. note:: You can also build a library from ports in a manual way if you prefer
+    that, but then you will need to also apply the python logic that ports does.
+    That code (under ``tools/ports/``) may do things like ensure necessary JS
+    functions are included in the build, add exports, and so forth. In general,
+    it's better to use the ports version as it is what is tested and known to
+    work.
 
 Adding more ports
 -----------------

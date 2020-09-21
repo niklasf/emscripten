@@ -4,10 +4,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#if SEPARATE_ASM && ASSERTIONS && WASM == 0 && MODULARIZE
-if (!({{{ASM_MODULE_NAME}}})) throw 'Must load asm.js Module in to variable {{{ASM_MODULE_NAME}}} before adding compiled output .js script to the DOM';
-#endif
-
 #include "runtime_safe_heap.js"
 
 #if ASSERTIONS
@@ -58,28 +54,17 @@ Module['wasm'] = base64Decode('{{{ getQuoted("WASM_BINARY_DATA") }}}');
 
 #include "runtime_functions.js"
 #include "runtime_strings.js"
-#include "runtime_sab_polyfill.js"
 
 #if USE_PTHREADS
-var STATIC_BASE = {{{ GLOBAL_BASE }}};
-
 if (!ENVIRONMENT_IS_PTHREAD) {
 #endif
 
 var GLOBAL_BASE = {{{ GLOBAL_BASE }}},
     TOTAL_STACK = {{{ TOTAL_STACK }}},
-#if !USE_PTHREADS
-    STATIC_BASE = {{{ GLOBAL_BASE }}},
-#endif
     STACK_BASE = {{{ getQuoted('STACK_BASE') }}},
     STACKTOP = STACK_BASE,
     STACK_MAX = {{{ getQuoted('STACK_MAX') }}}
-#if USES_DYNAMIC_ALLOC
-    , DYNAMICTOP_PTR = {{{ DYNAMICTOP_PTR }}};
-#endif
     ;
-
-#if WASM
 
 #if ALLOW_MEMORY_GROWTH && MAXIMUM_MEMORY != -1
 var wasmMaximumMemory = {{{ MAXIMUM_MEMORY >>> 16 }}};
@@ -108,27 +93,12 @@ assert(buffer instanceof SharedArrayBuffer, 'requested a shared WebAssembly.Memo
 
 #include "runtime_init_table.js"
 
-#else
-
-#if USE_PTHREADS
-var buffer = new SharedArrayBuffer({{{ INITIAL_MEMORY }}});
-#else
-var buffer = new ArrayBuffer({{{ INITIAL_MEMORY }}});
-#endif
-
-#if USE_PTHREADS
-}
-#endif
-
-#endif
-
 #if ASSERTIONS
-var WASM_PAGE_SIZE = 65536;
+var WASM_PAGE_SIZE = {{{ WASM_PAGE_SIZE }}};
 #if USE_PTHREADS
 if (!ENVIRONMENT_IS_PTHREAD) {
 #endif
 assert(STACK_BASE % 16 === 0, 'stack must start aligned to 16 bytes, STACK_BASE==' + STACK_BASE);
-assert(({{{ getQuoted('DYNAMIC_BASE') }}}) % 16 === 0, 'heap must start aligned to 16 bytes, DYNAMIC_BASE==' + {{{ getQuoted('DYNAMIC_BASE') }}});
 assert({{{ INITIAL_MEMORY }}} >= TOTAL_STACK, 'INITIAL_MEMORY should be larger than TOTAL_STACK, was ' + {{{ INITIAL_MEMORY }}} + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
 assert({{{ INITIAL_MEMORY }}} % WASM_PAGE_SIZE === 0);
 #if MAXIMUM_MEMORY != -1
@@ -170,7 +140,7 @@ var HEAPF32 = new Float32Array(buffer);
 var HEAPF64 = new Float64Array(buffer);
 #endif
 
-#if USE_PTHREADS && ((MEM_INIT_METHOD == 1 && !MEM_INIT_IN_WASM && !SINGLE_FILE) || (SINGLE_FILE && !WASM && !WASM_BACKEND) || USES_DYNAMIC_ALLOC)
+#if USE_PTHREADS && ((MEM_INIT_METHOD == 1 && !MEM_INIT_IN_WASM && !SINGLE_FILE) || USES_DYNAMIC_ALLOC)
 if (!ENVIRONMENT_IS_PTHREAD) {
 #endif
 
@@ -183,16 +153,7 @@ HEAPU8.set(new Uint8Array(Module['mem']), GLOBAL_BASE);
 
 #endif
 
-#if SINGLE_FILE && !WASM && !WASM_BACKEND
-#include "base64Decode.js"
-HEAPU8.set(base64Decode('{{{ getQuoted("BASE64_MEMORY_INITIALIZER") }}}'), GLOBAL_BASE);
-#endif
-
-#if USES_DYNAMIC_ALLOC
-  HEAP32[DYNAMICTOP_PTR>>2] = {{{ getQuoted('DYNAMIC_BASE') }}};
-#endif
-
-#if USE_PTHREADS && ((MEM_INIT_METHOD == 1 && !MEM_INIT_IN_WASM && !SINGLE_FILE) || (SINGLE_FILE && !WASM && !WASM_BACKEND) || USES_DYNAMIC_ALLOC)
+#if USE_PTHREADS && ((MEM_INIT_METHOD == 1 && !MEM_INIT_IN_WASM && !SINGLE_FILE) || USES_DYNAMIC_ALLOC)
 }
 #endif
 
@@ -210,27 +171,6 @@ var wasmOffsetConverter;
 #endif
 
 #if EXIT_RUNTIME
-
-function callRuntimeCallbacks(callbacks) {
-  while(callbacks.length > 0) {
-    var callback = callbacks.shift();
-    if (typeof callback == 'function') {
-      callback();
-      continue;
-    }
-    var func = callback.func;
-    if (typeof func === 'number') {
-      if (callback.arg === undefined) {
-        dynCall_v(func);
-      } else {
-        dynCall_vi(func, callback.arg);
-      }
-    } else {
-      func(callback.arg === undefined ? null : callback.arg);
-    }
-  }
-}
-
 var __ATEXIT__    = []; // functions called during shutdown
 #endif
 
@@ -240,11 +180,6 @@ var runtimeInitialized = false;
 // This is always false in minimal_runtime - the runtime does not have a concept of exiting (keeping this variable here for now since it is referenced from generated code)
 var runtimeExited = false;
 #endif
-
-/** @param {number|boolean=} ignore */
-{{{ unSign }}}
-/** @param {number|boolean=} ignore */
-{{{ reSign }}}
 
 #include "runtime_math.js"
 

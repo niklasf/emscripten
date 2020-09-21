@@ -7,9 +7,8 @@ __cxa_free_exception
 __cxa_rethrow
 __cxa_throw
 __cxa_uncaught_exceptions
-__map_file
+__indirect_function_table
 __resumeException
-__sys_munmap
 abort
 emscripten_memcpy_big
 emscripten_resize_heap
@@ -42,4 +41,3 @@ invoke_viiiiiiiiiiiiiii
 memory
 setTempRet0
 strftime_l
-table

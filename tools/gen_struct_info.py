@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # coding=utf-8
 # Copyright 2013 The Emscripten Authors.  All rights reserved.
 # Emscripten is available under two separate licenses, the MIT license and the
@@ -106,7 +106,7 @@ try:
 except ImportError:
   # The import failed
 
-  def parse_header(path, cpp_opts):
+  def parse_header(path, cpp_opts): # noqa
     # Tell the user how to get pycparser, if he or she tries to parse a C file.
     sys.stderr.write('ERR: I need pycparser to process C files. \n')
     sys.stderr.write('   Use "pip install pycparser" to install or download it from "https://github.com/eliben/pycparser".\n')
@@ -395,7 +395,7 @@ def inspect_code(headers, cpp_opts, structs, defines):
   show('Compiling generated code...')
   # -Oz optimizes enough to avoid warnings on code size/num locals
   cmd = [shared.EMCC] + cpp_opts + ['-o', js_file[1], src_file[1],
-                                    '-O0', '--js-opts', '0', '--memory-init-file', '0',
+                                    '-O0', '--memory-init-file', '0',
                                     '-Werror', '-Wno-format',
                                     '-s', 'BOOTSTRAPPING_STRUCT_INFO=1',
                                     '-s', 'WARN_ON_UNDEFINED_SYMBOLS=0',
@@ -408,9 +408,6 @@ def inspect_code(headers, cpp_opts, structs, defines):
   # TODO(sbc): Remove this one we remove the test_em_config_env_var test
   cmd += ['-Wno-deprecated']
 
-  if not shared.Settings.WASM_BACKEND:
-    # Avoid the binaryen dependency if we are only using fastcomp
-    cmd += ['-s', 'WASM=0', '-Wno-fastcomp']
   if shared.Settings.LTO:
     cmd += ['-flto=' + shared.Settings.LTO]
 

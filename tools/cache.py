@@ -4,7 +4,6 @@
 # found in the LICENSE file.
 
 from __future__ import print_function
-from .toolchain_profiler import ToolchainProfiler
 import os
 import shutil
 import logging
@@ -32,14 +31,11 @@ class Cache(object):
 
     # if relevant, use a subdir of the cache
     if use_subdir:
-      if shared.Settings.WASM_BACKEND:
-        subdir = 'wasm'
-        if shared.Settings.LTO:
-          subdir += '-lto'
-        if shared.Settings.RELOCATABLE:
-          subdir += '-pic'
-      else:
-        subdir = 'asmjs'
+      subdir = 'wasm'
+      if shared.Settings.LTO:
+        subdir += '-lto'
+      if shared.Settings.RELOCATABLE:
+        subdir += '-pic'
       dirname = os.path.join(dirname, subdir)
 
     self.dirname = dirname
@@ -136,30 +132,6 @@ class Cache(object):
       self.release_cache_lock()
 
     return cachename
-
-
-# Given a set of functions of form (ident, text), and a preferred chunk size,
-# generates a set of chunks for parallel processing and caching.
-def chunkify(funcs, chunk_size, DEBUG=False):
-  with ToolchainProfiler.profile_block('chunkify'):
-    chunks = []
-    # initialize reasonably, the rest of the funcs we need to split out
-    curr = []
-    total_size = 0
-    for i in range(len(funcs)):
-      func = funcs[i]
-      curr_size = len(func[1])
-      if total_size + curr_size < chunk_size:
-        curr.append(func)
-        total_size += curr_size
-      else:
-        chunks.append(curr)
-        curr = [func]
-        total_size = curr_size
-    if curr:
-      chunks.append(curr)
-      curr = None
-    return [''.join(func[1] for func in chunk) for chunk in chunks] # remove function names
 
 
 try:

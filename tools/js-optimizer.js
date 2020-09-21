@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Copyright 2011 The Emscripten Authors.  All rights reserved.
 // Emscripten is available under two separate licenses, the MIT license and the
 // University of Illinois/NCSA Open Source License.  Both these licenses can be
@@ -15,127 +16,32 @@
 //       instead of returning it to the previous call frame where we check?
 // TODO: Share EMPTY_NODE instead of emptyNode that constructs?
 
-if (!Math.fround) {
-  var froundBuffer = new Float32Array(1);
-  Math.fround = function(x) { froundBuffer[0] = x; return froundBuffer[0] };
-}
-
-// *** Environment setup code ***
-var arguments_ = [];
-var debug = false;
-
-var ENVIRONMENT_IS_NODE = typeof process === 'object';
-var ENVIRONMENT_IS_WEB = typeof window === 'object';
-var ENVIRONMENT_IS_WORKER = typeof importScripts === 'function';
-var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
-
-if (ENVIRONMENT_IS_NODE) {
-  // Expose functionality in the same simple way that the shells work
-  // Note that we pollute the global namespace here, otherwise we break in node
-  print = function(x) {
-    process['stdout'].write(x + '\n');
-  };
-  printErr = function(x) {
-    process['stderr'].write(x + '\n');
-  };
-
-  var nodeFS = require('fs');
-  var nodePath = require('path');
-
-  if (!nodeFS.existsSync) {
-    nodeFS.existsSync = function(path) {
-      try {
-        return !!nodeFS.readFileSync(path);
-      } catch(e) {
-        return false;
-      }
-    }
-  }
-
-  function find(filename) {
-    var prefixes = [nodePath.join(__dirname, '..', 'src'), process.cwd()];
-    for (var i = 0; i < prefixes.length; ++i) {
-      var combined = nodePath.join(prefixes[i], filename);
-      if (nodeFS.existsSync(combined)) {
-        return combined;
-      }
-    }
-    return filename;
-  }
-
-  read = function(filename) {
-    var absolute = find(filename);
-    return nodeFS['readFileSync'](absolute).toString();
-  };
-
-  load = function(f) {
-    globalEval(read(f));
-  };
-
-  arguments_ = process['argv'].slice(2);
-
-} else if (ENVIRONMENT_IS_SHELL) {
-  // Polyfill over SpiderMonkey/V8 differences
-  if (!this['read']) {
-    this['read'] = function(f) { snarf(f) };
-  }
-
-  if (typeof scriptArgs != 'undefined') {
-    arguments_ = scriptArgs;
-  } else if (typeof arguments != 'undefined') {
-    arguments_ = arguments;
-  }
-
-} else if (ENVIRONMENT_IS_WEB) {
-  this['print'] = printErr = function(x) {
-    console.log(x);
-  };
-
-  this['read'] = function(url) {
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', url, false);
-    xhr.send(null);
-    return xhr.responseText;
-  };
-
-  if (this['arguments']) {
-    arguments_ = arguments;
-  }
-} else if (ENVIRONMENT_IS_WORKER) {
-  // We can do very little here...
-
-  this['load'] = importScripts;
-
-} else {
-  throw 'Unknown runtime environment. Where are we?';
-}
-
-function globalEval(x) {
-  eval.call(null, x);
-}
-
-if (typeof load === 'undefined' && typeof read != 'undefined') {
-  this['load'] = function(f) {
-    globalEval(read(f));
-  };
-}
-
-if (typeof printErr === 'undefined') {
-  this['printErr'] = function(){};
-}
-
-if (typeof print === 'undefined') {
-  this['print'] = printErr;
-}
-// *** Environment setup code ***
-
 var uglify = require('../third_party/uglify-js');
 var fs = require('fs');
 var path = require('path');
+var fs = require('fs');
 
-// Load some modules
+var arguments_ = process['argv'].slice(2);
+var debug = false;
 
-load('utility.js');
+function printErr(x) {
+  process.stderr.write(x + '\n');
+}
+
+function print(x) {
+  process.stdout.write(x + '\n');
+}
+
+function read(filename) {
+  return fs.readFileSync(filename).toString();
+}
+
+function load(f) {
+  f = path.join(__dirname, f)
+  eval.call(null, read(f));
+};
+
+load('../src/utility.js');
 
 // Utilities
 
@@ -895,7 +801,7 @@ function simplifyExpressions(ast) {
               if (correct === 'HEAP32') {
                 define[3] = ['binary', '|', define[3], ['num', 0]];
               } else {
-                define[3] = makeAsmCoercion(define[3], asmPreciseF32 ? ASM_FLOAT : ASM_DOUBLE);
+                define[3] = makeAsmCoercion(define[3], ASM_FLOAT);
               }
               // do we want a simplifybitops on the new values here?
             });
@@ -904,7 +810,7 @@ function simplifyExpressions(ast) {
             });
             var correctType;
             switch(asmData.vars[v]) {
-              case ASM_INT: correctType = asmPreciseF32 ? ASM_FLOAT : ASM_DOUBLE; break;
+              case ASM_INT: correctType = ASM_FLOAT; break;
               case ASM_FLOAT: case ASM_DOUBLE: correctType = ASM_INT; break;
             }
             asmData.vars[v] = correctType;
@@ -4580,7 +4486,7 @@ function minifyGlobals(ast) {
   var minified = {};
   var next = 0;
   function getMinified(name) {
-    if (minified[name]) return minified[name];
+    if (minified.hasOwnProperty(name)) return minified[name];
     ensureMinifiedNames(next);
     return minified[name] = minifiedNames[next++];
   }
@@ -4706,10 +4612,9 @@ function minifyLocals(ast) {
     }
 
     // Traverse and minify all names.
-    if (fun[1] in extraInfo.globals) {
-      fun[1] = extraInfo.globals[fun[1]];
-      assert(fun[1]);
-    }
+    assert(extraInfo.globals.hasOwnProperty(fun[1]));
+    fun[1] = extraInfo.globals[fun[1]];
+    assert(fun[1] && typeof fun[1] === 'string');
     if (fun[2]) {
       for (var i = 0; i < fun[2].length; i++) {
         var minified = getNextMinifiedName();
@@ -4836,178 +4741,6 @@ function measureCost(ast) {
     size++;
   });
   return size;
-}
-
-function aggressiveVariableEliminationInternal(func, asmData) {
-  // This removes as many variables as possible. This is often not the best thing because it increases
-  // code size, but it is far preferable to the risk of split functions needing to do more spilling, so
-  // we use it when outlining.
-  // Specifically, this finds 'trivial' variables: ones with 1 definition, and that definition is not sensitive to any changes: it
-  // only depends on constants and local variables that are themselves trivial. We can unquestionably eliminate
-  // such variables in a trivial manner.
-
-  var assignments = {};
-  var appearances = {};
-  var defs = {};
-  var considered = {};
-
-  traverse(func, function(node, type) {
-    if (type == 'assign' && node[2][0] == 'name') {
-      var name = node[2][1];
-      if (name in asmData.vars) {
-        assignments[name] = (assignments[name] || 0) + 1;
-        appearances[name] = (appearances[name] || 0) - 1; // this appearance is a definition, offset the counting later
-        defs[name] = node;
-      } else {
-        if (name in asmData.params) {
-          assignments[name] = (assignments[name] || 1) + 1; // init to 1 for initial parameter assignment
-          considered[name] = true; // this parameter is not ssa, it must be in a hand-optimized function, so it is not trivial
-        }
-      }
-    } else if (type == 'name') {
-      var name = node[1];
-      if (name in asmData.vars) {
-        appearances[name] = (appearances[name] || 0) + 1;
-      }
-    }
-  });
-
-  var allTrivials = {}; // key of a trivial var => size of its (expanded) value, at least 1
-
-  // three levels of variables:
-  // 1. trivial: 1 def (or less), uses nothing sensitive, can be eliminated
-  // 2. safe: 1 def (or less), can be used in a trivial, but cannot itself be eliminated
-  // 3. sensitive: uses a global or memory or something else that prevents trivial elimination.
-
-  function assessTriviality(name) {
-    // only care about vars with 0-1 assignments of (0 for parameters), and can ignore label (which is not explicitly initialized, but cannot be eliminated ever anyhow)
-    if (assignments[name] > 1 || (!(name in asmData.vars) && !(name in asmData.params)) || name == 'label') return false;
-    if (considered[name]) return allTrivials[name];
-    considered[name] = true;
-    var sensitive = false;
-    var size = 0, originalSize = 0;
-    var def = defs[name];
-    if (def) {
-      var value = def[3];
-      originalSize = measureSize(value);
-      if (value) {
-        traverse(value, function recurseValue(node, type) {
-          var one = node[1];
-          if (!(type in NODES_WITHOUT_ELIMINATION_SENSITIVITY)) { // || (type == 'binary' && !(one in FAST_ELIMINATION_BINARIES))) {
-            sensitive = true;
-            return true;
-          }
-          if (type == 'name' && !assessTriviality(one)) {
-            if (assignments[one] > 1 || (!(one in asmData.vars) && !(one in asmData.params))) {
-              sensitive = true; // directly using something sensitive
-              return true;
-            } // otherwise, not trivial, but at least safe.
-          }
-          // if this is a name, it must be a trivial variable (or a safe one) and we know its size
-          size += ((type == 'name') ? allTrivials[one] : 1) || 1;
-        });
-      }
-    }
-    if (!sensitive) {
-      size = size || 1;
-      originalSize = originalSize || 1;
-      var factor = ((appearances[name] - 1) || 0) * (size - originalSize); // If no size change or just one appearance, always ok to trivially eliminate. otherwise, tradeoff
-      if (factor <= 12) {
-        allTrivials[name] = size; // trivial!
-        return true;
-      }
-    }
-    return false;
-  }
-  for (var name in asmData.vars) {
-    assessTriviality(name);
-  }
-  var trivials = {};
-
-  for (var name in allTrivials) { // from now on, ignore parameters
-    if (name in asmData.vars) trivials[name] = true;
-  }
-
-  allTrivials = {};
-
-  var values = {}, recursives = {};
-
-  function evaluate(name) {
-    var node = values[name];
-    if (node) return node;
-    values[name] = null; // prevent infinite recursion
-    var def = defs[name];
-    if (def) {
-      node = def[3];
-      if (node[0] == 'name') {
-        var name2 = node[1];
-        assert(name2 !== name);
-        if (name2 in trivials) {
-          node = evaluate(name2);
-        }
-      } else {
-        traverse(node, function(node, type) {
-          if (type == 'name') {
-            var name2 = node[1];
-            if (name2 === name) {
-              recursives[name] = 1;
-              return false;
-            }
-            if (name2 in trivials) {
-              return evaluate(name2);
-            }
-          }
-        });
-      }
-      values[name] = node;
-    }
-    // 'def' is non-null only if the variable was explicitly re-assigned after its definition.
-    // If it wasn't, the initial value should be used, which is supposed to always be zero.
-    else if (name in asmData.vars) {
-      values[name] = makeAsmCoercedZero(asmData.vars[name])
-    }
-    return node;
-  }
-
-  for (var name in trivials) {
-    evaluate(name);
-  }
-  for (var name in recursives) {
-    delete trivials[name];
-  }
-
-  for (var name in trivials) {
-    var def = defs[name];
-    if (def) {
-      def.length = 0;
-      def[0] = 'toplevel';
-      def[1] = [];
-    }
-    delete asmData.vars[name];
-  }
-
-  // Perform replacements TODO: save list of uses objects before, replace directly, avoid extra traverse
-  traverse(func, function(node, type) {
-    if (type == 'name') {
-      var name = node[1];
-      if (name in trivials) {
-        var value = values[name];
-        if (value) return copy(value); // must copy, or else the same object can be used multiple times
-        else return emptyNode();
-      }
-    }
-  });
-
-  removeAllEmptySubNodes(func);
-}
-
-function aggressiveVariableElimination(ast) {
-  assert(asm, 'need ASM_JS for aggressive variable elimination');
-  traverseGeneratedFunctions(ast, function(func, type) {
-    var asmData = normalizeAsm(func);
-    aggressiveVariableEliminationInternal(func, asmData);
-    denormalizeAsm(func, asmData);
-  });
 }
 
 function fixPtr(ptr, heap) {
@@ -5235,26 +4968,6 @@ function splitMemoryShell(ast) {
   splitMemory(ast, true);
 }
 
-function optimizeFrounds(ast) {
-  // collapse fround(fround(..)), which can happen due to elimination
-  // also emit f0 instead of fround(0) (except in returns)
-  var inReturn = false;
-  function fix(node) {
-    if (node[0] === 'return') inReturn = true;
-    traverseChildren(node, fix);
-    if (node[0] === 'return') inReturn = false;
-    if (node[0] === 'call' && node[1][0] === 'name' && node[1][1] === 'Math_fround') {
-      var arg = node[2][0];
-      if (arg[0] === 'num') {
-        if (!inReturn && arg[1] === 0) return ['name', 'f0'];
-      } else if (arg[0] === 'call' && arg[1][0] === 'name' && arg[1][1] === 'Math_fround') {
-        return arg;
-      }
-    }
-  }
-  traverseChildren(ast, fix);
-}
-
 // Ensures that if label exists, it is assigned an initial value (to not assume the asm declaration has an effect, which we normally do not)
 function ensureLabelSet(ast) {
   assert(asm);
@@ -5306,22 +5019,6 @@ function findUninitializedVars(func, asmData) {
   return bad;
 }
 
-function trample(x, y) { // x = y, by trampling it
-  for (var i = 0; i < y.length; i++) {
-    x[i] = y[i];
-  }
-  x.length = y.length;
-}
-
-function ilog2(x) {
-  x = Math.round(x);
-  if (x === 1) return 0;
-  if (x === 2) return 1;
-  if (x === 4) return 2;
-  if (x === 8) return 3;
-  throw 'ilog2 is not smart enough for ' + x;
-}
-
 // emits which functions are directly reachable, except for some that are
 // ignored
 function findReachable(ast) {
@@ -5360,7 +5057,8 @@ function dumpCallGraph(ast) {
 
 // Last pass utilities
 
-// Change +5 to DOT$ZERO(5). We then textually change 5 to 5.0 (uglify's ast cannot differentiate between 5 and 5.0 directly)
+// Change +5 to DOT$ZERO(5). We then textually change 5 to 5.0 (uglify's ast
+// cannot differentiate between 5 and 5.0 directly)
 function prepDotZero(ast) {
   traverse(ast, function(node, type) {
     if (type === 'unary-prefix' && node[1] === '+') {
@@ -5371,6 +5069,7 @@ function prepDotZero(ast) {
     }
   });
 }
+
 function fixDotZero(js) {
   return js.replace(/-DOT\$ZERO\(-/g, '- DOT$ZERO(-') // avoid x - (-y.0) turning into x--y.0 when minified
            .replace(/DOT\$ZERO\(([-+]?(0x)?[0-9a-f]*\.?[0-9]*([eE][-+]?[0-9]+)?)\)/g, function(m, num) {
@@ -5485,142 +5184,6 @@ function asmLastOpts(ast) {
   });
 }
 
-// Contrary to the name this does not eliminate actual dead functions, only
-// those marked as such with DEAD_FUNCTIONS
-function eliminateDeadFuncs(ast) {
-  assert(asm);
-  assert(extraInfo && extraInfo.dead_functions);
-  var deadFunctions = set(extraInfo.dead_functions);
-  traverseGeneratedFunctions(ast, function (fun, type) {
-    if (!(fun[1] in deadFunctions)) {
-      return;
-    }
-    var asmData = normalizeAsm(fun);
-    fun[3] = [['stat', ['call', ['name', 'abort'], [['num', -1]]]]];
-    asmData.vars = {};
-    denormalizeAsm(fun, asmData);
-  });
-}
-
-// Cleans up globals in an asm.js module that are not used. Assumes it
-// receives a full asm.js module, as from the side file in --separate-asm
-function eliminateDeadGlobals(ast) {
-  traverse(ast, function(func, type) {
-    if (type !== 'function') return;
-    // find all symbols used by name that are not locals, so they must be globals
-    var stats = func[3];
-    var used = {};
-    for (var i = 0; i < stats.length; i++) {
-      var asmFunc = stats[i];
-      if (asmFunc[0] === 'defun') {
-        // the memory growth function does not contain valid asm.js, and can be ignored
-        var isAsmJS = asmFunc[1] !== '_emscripten_replace_memory';
-        if (isAsmJS) {
-          var asmData = normalizeAsm(asmFunc);
-        }
-        traverse(asmFunc, function(node, type) {
-          if (type == 'name') {
-            var name = node[1];
-            if (!isAsmJS || !(name in asmData.params || name in asmData.vars)) {
-              used[name] = 1;
-            }
-          }
-        });
-        if (isAsmJS) {
-          denormalizeAsm(asmFunc, asmData);
-        }
-      } else {
-        traverse(asmFunc, function(node, type) {
-          if (type == 'name') {
-            var name = node[1];
-            used[name] = 1;
-          }
-        });
-      }
-    }
-    for (var i = 0; i < stats.length; i++) {
-      var node = stats[i];
-      if (node[0] === 'var') {
-        for (var j = 0; j < node[1].length; j++) {
-          var v = node[1][j];
-          var name = v[0];
-          var value = v[1];
-          if (!(name in used)) {
-            node[1].splice(j, 1);
-            j--;
-            if (node[1].length == 0) {
-              // remove the whole var
-              stats[i] = emptyNode();
-            }
-          }
-        }
-      } else if (node[0] === 'defun') {
-        if (!(node[1] in used)) {
-          stats[i] = emptyNode();
-        }
-      }
-    }
-    removeEmptySubNodes(func);
-  });
-}
-
-function isAsmLibraryArgAssign(node) {
-  return node[0] === 'var' && node[1][0] && node[1][0][0] == 'asmLibraryArg';
-}
-
-function asmLibraryArgs(node) {
-  return node[1][0][1];
-}
-
-function isAsmUse(node) {
-  return node[0] === 'sub' &&
-         ((node[1][0] === 'name' && node[1][1] === 'asm') || // asm['X']
-          (node[1][0] === 'sub' && node[1][1][0] === 'name' && node[1][1][1] === 'Module' && node[1][2][0] === 'string' && node[1][2][1] === 'asm')) && // Module
-         node[2][0] === 'string';
-}
-
-function getAsmUseName(node) {
-  return node[2][1];
-}
-
-function isModuleUse(node) {
-  return node[0] === 'sub' &&
-         node[1][0] === 'name' && node[1][1] === 'Module' && // Module['X']
-         node[2][0] === 'string';
-}
-
-function getModuleUseName(node) {
-  return node[2][1];
-}
-
-function isModuleAsmUse(node) { // Module["asm"][..string..]
-  return node[0] === 'sub' &&
-         node[1][0] === 'sub' && node[1][1][0] === 'name' && node[1][1][1] === 'Module' && node[1][2][0] === 'string' && node[1][2][1] === 'asm' &&
-         node[2][0] === 'string';
-}
-
-// A static dyncall is dynCall('vii', ..), which is actually static even
-// though we call dynCall() - we see the string signature statically.
-function isStaticDynCall(node) {
-  return node[0] === 'call' && node[1][0] === 'name' && node[1][1] === 'dynCall' && node[2][0][0] === 'string';
-}
-
-function getStaticDynCallName(node) {
-  return 'dynCall_' + node[2][0][1];
-}
-
-// a dynamic dyncall is one in which all we know is *some* dynCall may
-// be called, but not who. This can be either
-//   dynCall(*not a string*, ..)
-// or, to be conservative,
-//   "dynCall_"
-// as that prefix means we may be constructing a dynamic dyncall name
-// (dynCall and embind's requireFunction do this internally).
-function isDynamicDynCall(node) {
-  return (node[0] === 'call' && node[1][0] === 'name' && node[1][1] === 'dynCall' && node[2][0][0] !== 'string') ||
-         (node[0] === 'string' && node[1] === 'dynCall_');
-}
-
 function removeFuncs(ast) {
   assert(ast[0] === 'toplevel');
   var keep = set(extraInfo.keep);
@@ -5633,7 +5196,7 @@ function removeFuncs(ast) {
 // Passes table
 
 var minifyWhitespace = false, printMetadata = true, asm = false,
-    asmPreciseF32 = false, emitJSON = false, last = false,
+    emitJSON = false, last = false,
     emitAst = true;
 
 var passes = {
@@ -5650,18 +5213,14 @@ var passes = {
   loopOptimizer: loopOptimizer,
   registerize: registerize,
   registerizeHarder: registerizeHarder,
-  eliminateDeadFuncs: eliminateDeadFuncs,
-  eliminateDeadGlobals: eliminateDeadGlobals,
   eliminate: eliminate,
   eliminateMemSafe: eliminateMemSafe,
-  aggressiveVariableElimination: aggressiveVariableElimination,
   minifyGlobals: minifyGlobals,
   minifyLocals: minifyLocals,
   relocate: relocate,
   safeHeap: safeHeap,
   splitMemory: splitMemory,
   splitMemoryShell: splitMemoryShell,
-  optimizeFrounds: optimizeFrounds,
   ensureLabelSet: ensureLabelSet,
   findReachable: findReachable,
   dumpCallGraph: dumpCallGraph,
@@ -5673,7 +5232,6 @@ var passes = {
   minifyWhitespace: function() { minifyWhitespace = true },
   noPrintMetadata: function() { printMetadata = false },
   asm: function() { asm = true },
-  asmPreciseF32: function() { asmPreciseF32 = true },
   emitJSON: function() { emitJSON = true },
   receiveJSON: function() { }, // handled in a special way, before passes are run
   last: function() { last = true },

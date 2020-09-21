@@ -51,7 +51,7 @@ Options that are modified or new in *emcc* are listed below:
 .. _emcc-O1:
 
 ``-O1``
-  Simple optimizations. During the compile step these include LLVM ``-O1`` optimizations. During the link step this removes various runtime assertions in JS and also runs the Binaryen optimizer (that makes link slower, so even if you compiled with a higher optimization level, you may want to link with ``-O0`` for fast incremental builds).
+  Simple optimizations. During the compile step these include LLVM ``-O1`` optimizations. During the link step this does not include various runtime assertions in JS that `-O0` would do.
 
 .. _emcc-O2:
 
@@ -95,11 +95,11 @@ Options that are modified or new in *emcc* are listed below:
       -s RUNTIME_LINKED_LIBS="['liblib.so']"
       -s "RUNTIME_LINKED_LIBS=['liblib.so']"
 
-  You can also specify that the value of an option will be read from a specified JSON-formatted file. For example, the following option sets the ``DEAD_FUNCTIONS`` option with the contents of the file at **path/to/file**.
+  You can also specify that the value of an option will be read from a specified JSON-formatted file. For example, the following option sets the ``EXPORTED_FUNCTIONS`` option with the contents of the file at **path/to/file**.
 
   ::
 
-    -s DEAD_FUNCTIONS=@/path/to/file
+    -s EXPORTED_FUNCTIONS=@/path/to/file
 
   .. note::
 
@@ -179,18 +179,6 @@ Options that are modified or new in *emcc* are listed below:
 
   .. note:: This is only relevant when :term:`minifying` global names, which happens in ``-O2`` and above, and when no ``-g`` option was specified to prevent minification.
 
-.. _emcc-js-opts:
-
-``--js-opts <level>``
-  Enables JavaScript optimizations, relevant when we generate JavaScript. Possible ``level`` values are:
-
-    - ``0``: Prevent JavaScript optimizer from running.
-    - ``1``: Use JavaScript optimizer (default).
-
-  You normally don't need to specify this option, as ``-O`` with an optimization level will set a good value.
-
-  .. note:: Some options might override this flag (e.g. ``DEAD_FUNCTIONS``, ``SAFE_HEAP`` and ``SPLIT_MEMORY`` override the value with ``js-opts=1``), because they depend on the js-optimizer.
-
 .. _emcc-llvm-opts:
 
 ``--llvm-opts <level>``
@@ -207,20 +195,10 @@ Options that are modified or new in *emcc* are listed below:
 
   You normally don't need to specify this option, as ``-O`` with an optimization level will set a good value.
 
-.. _emcc-llvm-lto:
+.. _emcc-lto:
 
-``--llvm-lto <level>``
-  Enables LLVM link-time optimizations (LTO). Possible ``level`` values are:
-
-    - ``0``: No LLVM LTO (default).
-    - ``1``: LLVM LTO is performed.
-    - ``2``: Combine all the bitcode and run LLVM opt on it using the specified ``--llvm-opts``. This optimizes across modules, but is not the same as normal LTO.
-    - ``3``: Does level ``2`` and then level ``1``.
-
-  .. note::
-
-    - If LLVM optimizations are not run (see ``--llvm-opts``), this setting has no effect.
-    - LLVM LTO is not perfectly stable yet, and can cause code to behave incorrectly.
+``-flto``
+  Enables link-time optimizations (LTO).
 
 .. _emcc-closure:
 
@@ -236,7 +214,7 @@ Options that are modified or new in *emcc* are listed below:
     - Consider using ``-s MODULARIZE=1`` when using closure, as it minifies globals to names that might conflict with others in the global scope. ``MODULARIZE`` puts all the output into a function (see ``src/settings.js``).
     - Closure will minify the name of `Module` itself, by default! Using ``MODULARIZE`` will solve that as well. Another solution is to make sure a global variable called `Module` already exists before the closure-compiled code runs, because then it will reuse that variable.
     - If closure compiler hits an out-of-memory, try adjusting ``JAVA_HEAP_SIZE`` in the environment (for example, to 4096m for 4GB).
-    - Closure is only run if JavaScript opts are being done (``-O2`` or above, or ``--js-opts 1``).
+    - Closure is only run if JavaScript opts are being done (``-O2`` or above).
 
 
 .. _emcc-pre-js:
@@ -473,9 +451,6 @@ Options that are modified or new in *emcc* are listed below:
 ``-c``
   Tells *emcc* to generate LLVM bitcode (which can then be linked with other bitcode files), instead of compiling all the way to JavaScript.
 
-``--separate-asm``
-  Emits asm.js in one file, and the rest of the code in another, and emits HTML that loads the asm.js first, in order to reduce memory load during startup. See :ref:`optimizing-code-separating_asm`.
-
 ``--output_eol windows|linux``
   Specifies the line ending to generate for the text files that are outputted. If "--output_eol windows" is passed, the final output files will have Windows \r\n line endings in them. With "--output_eol linux", the final generated files will be written with Unix \n line endings.
 
@@ -490,7 +465,6 @@ Environment variables
 *emcc* is affected by several environment variables, as listed below:
 
   - ``EMMAKEN_JUST_CONFIGURE``
-  - ``EMMAKEN_COMPILER``
   - ``EMMAKEN_CFLAGS``
   - ``EMCC_DEBUG``
   - ``EMCC_CLOSURE_ARGS`` : arguments to be passed to *Closure Compiler*
@@ -508,7 +482,6 @@ Search for 'os.environ' in `emcc.py <https://github.com/emscripten-core/emscript
 
   - ASSERTIONS
   - SAFE_HEAP
-  - AGGRESSIVE_VARIABLE_ELIMINATION=1
   - -s DISABLE_EXCEPTION_CATCHING=0.
   - INLINING_LIMIT=
 

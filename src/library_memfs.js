@@ -5,7 +5,7 @@
  */
 
 mergeInto(LibraryManager.library, {
-  $MEMFS__deps: ['$FS'],
+  $MEMFS__deps: ['$FS', '$mmapAlloc'],
   $MEMFS: {
     ops_table: null,
     mount: function(mount) {
@@ -289,15 +289,6 @@ mergeInto(LibraryManager.library, {
         // memory buffer, as they may get invalidated. That means we
         // need to do copy its contents.
         if (buffer.buffer === HEAP8.buffer) {
-#if ASSERTIONS
-          // FIXME: this is inefficient as the file packager may have
-          //        copied the data into memory already - we may want to
-          //        integrate more there and let the file packager loading
-          //        code be able to query if memory growth is on or off.
-          if (canOwn) {
-            warnOnce('file packager has copied file data into memory, but in memory growth we are forced to copy it again (see --no-heap-copy)');
-          }
-#endif // ASSERTIONS
           canOwn = false;
         }
 #endif // ALLOW_MEMORY_GROWTH
@@ -382,7 +373,7 @@ mergeInto(LibraryManager.library, {
             }
           }
           allocated = true;
-          ptr = FS.mmapAlloc(length);
+          ptr = mmapAlloc(length);
           if (!ptr) {
             throw new FS.ErrnoError({{{ cDefine('ENOMEM') }}});
           }

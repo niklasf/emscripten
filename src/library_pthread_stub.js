@@ -9,7 +9,6 @@ var LibraryPThreadStub = {
   // Stub implementation for pthread.h when not compiling with pthreads support enabled.
   // ===================================================================================
 
-#if ENVIRONMENT_MAY_BE_WORKER || WASM_BACKEND
   emscripten_is_main_browser_thread: function() {
 #if MINIMAL_RUNTIME
     return typeof importScripts === 'undefined';
@@ -17,13 +16,6 @@ var LibraryPThreadStub = {
     return !ENVIRONMENT_IS_WORKER;
 #endif
   },
-#else
-  emscripten_is_main_browser_thread__asm: true,
-  emscripten_is_main_browser_thread__sig: 'i',
-  emscripten_is_main_browser_thread: function() {
-    return 1;
-  },
-#endif
 
   pthread_mutexattr_init: function() {},
   pthread_mutexattr_setschedparam: function() {},
@@ -81,21 +73,19 @@ var LibraryPThreadStub = {
 
   pthread_cleanup_push__sig: 'vii',
   pthread_cleanup_push: function(routine, arg) {
-    __ATEXIT__.push(function() { {{{ makeDynCall('vi') }}}(routine, arg) })
+    __ATEXIT__.push({ func: routine, arg: arg });
     _pthread_cleanup_push.level = __ATEXIT__.length;
   },
 
-  pthread_cleanup_pop: function() {
+  pthread_cleanup_pop__sig: 'vi',
+  pthread_cleanup_pop: function(execute) {
     assert(_pthread_cleanup_push.level == __ATEXIT__.length, 'cannot pop if something else added meanwhile!');
-    __ATEXIT__.pop();
+    callback = __ATEXIT__.pop();
+    if (execute) {
+      {{{ makeDynCall('vi', 'callback.func') }}}(callback.arg)
+    }
     _pthread_cleanup_push.level = __ATEXIT__.length;
   },
-
-  _pthread_cleanup_push__sig: 'vii',
-  _pthread_cleanup_push: 'pthread_cleanup_push',
-
-  _pthread_cleanup_pop__sig: 'v',
-  _pthread_cleanup_pop: 'pthread_cleanup_pop',
 
   // pthread_sigmask - examine and change mask of blocked signals
   pthread_sigmask: function(how, set, oldset) {

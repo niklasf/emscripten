@@ -47,9 +47,7 @@ var wasmMemory;
 // In fastcomp asm.js, we don't need a wasm Table at all.
 // In the wasm backend, we polyfill the WebAssembly object,
 // so this creates a (non-native-wasm) table for us.
-#if WASM_BACKEND || WASM
 #include "runtime_init_table.js"
-#endif // WASM_BACKEND || WASM
 
 #if USE_PTHREADS
 // For sending to workers.
@@ -137,7 +135,7 @@ function ccall(ident, returnType, argTypes, args, opts) {
     }
   }
   var ret = func.apply(null, cArgs);
-#if ASYNCIFY && WASM_BACKEND
+#if ASYNCIFY
   var asyncMode = opts && opts.async;
   var runningAsync = typeof Asyncify === 'object' && Asyncify.currData;
   var prevRunningAsync = typeof Asyncify === 'object' && Asyncify.asyncFinalizers.length > 0;
@@ -163,7 +161,7 @@ function ccall(ident, returnType, argTypes, args, opts) {
 
   ret = convertReturnValue(ret);
   if (stack !== 0) stackRestore(stack);
-#if ASYNCIFY && WASM_BACKEND
+#if ASYNCIFY
   // If this is an async ccall, ensure we return a promise
   if (opts && opts.async) return Promise.resolve(ret);
 #endif
@@ -189,10 +187,24 @@ function cwrap(ident, returnType, argTypes, opts) {
   }
 }
 
+#if ASSERTIONS
+// We used to include malloc/free by default in the past. Show a helpful error in
+// builds with assertions.
+#if !('_malloc' in IMPLEMENTED_FUNCTIONS)
+function _malloc() {
+  abort("malloc() called but not included in the build - add '_malloc' to EXPORTED_FUNCTIONS");
+}
+#endif // malloc
+#if !('_free' in IMPLEMENTED_FUNCTIONS)
+function _free() {
+  // Show a helpful error since we used to include free by default in the past.
+  abort("free() called but not included in the build - add '_free' to EXPORTED_FUNCTIONS");
+}
+#endif // free
+#endif // ASSERTIONS
+
 var ALLOC_NORMAL = 0; // Tries to use _malloc()
 var ALLOC_STACK = 1; // Lives for the duration of the current function call
-var ALLOC_DYNAMIC = 2; // Cannot be freed except through sbrk
-var ALLOC_NONE = 3; // Do not allocate
 
 // allocate(): This is for internal use. You can use it yourself as well, but the interface
 //             is a little tricky (see docs right below). The reason is that it is optimized
@@ -208,7 +220,7 @@ var ALLOC_NONE = 3; // Do not allocate
 //         ignored.
 // @allocator: How to allocate memory, see ALLOC_*
 /** @type {function((TypedArray|Array<number>|number), string, number, number=)} */
-function allocate(slab, types, allocator, ptr) {
+function allocate(slab, types, allocator) {
   var zeroinit, size;
   if (typeof slab === 'number') {
     zeroinit = true;
@@ -220,22 +232,17 @@ function allocate(slab, types, allocator, ptr) {
 
   var singleType = typeof types === 'string' ? types : null;
 
-  var ret;
-  if (allocator == ALLOC_NONE) {
-    ret = ptr;
-  } else {
-    ret = [_malloc,
+  var ret = [{{{ ('_malloc' in IMPLEMENTED_FUNCTIONS) ? '_malloc' : 'null' }}},
 #if DECLARE_ASM_MODULE_EXPORTS
-    stackAlloc,
+  stackAlloc,
 #else
-    typeof stackAlloc !== 'undefined' ? stackAlloc : null,
+  typeof stackAlloc !== 'undefined' ? stackAlloc : null,
 #endif
-    dynamicAlloc][allocator](Math.max(size, singleType ? 1 : types.length));
-  }
+  ][allocator](Math.max(size, singleType ? 1 : types.length));
 
   if (zeroinit) {
     var stop;
-    ptr = ret;
+    var ptr = ret;
     assert((ret & 3) == 0);
     stop = ret + (size & ~3);
     for (; ptr < stop; ptr += 4) {
@@ -250,7 +257,7 @@ function allocate(slab, types, allocator, ptr) {
 
   if (singleType === 'i8') {
     if (slab.subarray || slab.slice) {
-      HEAPU8.set(/** @type {!Uint8Array} */ (slab), ret);
+      HEAPU8.set(/** @type {!Uint8Array} */slab, ret);
     } else {
       HEAPU8.set(new Uint8Array(slab), ret);
     }
@@ -285,12 +292,6 @@ function allocate(slab, types, allocator, ptr) {
   return ret;
 }
 
-// Allocate memory during any stage of startup - static memory early on, dynamic memory later, malloc when ready
-function getMemory(size) {
-  if (!runtimeInitialized) return dynamicAlloc(size);
-  return _malloc(size);
-}
-
 #include "runtime_strings.js"
 #include "runtime_strings_extra.js"
 
@@ -298,7 +299,6 @@ function getMemory(size) {
 
 var PAGE_SIZE = {{{ POSIX_PAGE_SIZE }}};
 var WASM_PAGE_SIZE = {{{ WASM_PAGE_SIZE }}};
-var ASMJS_PAGE_SIZE = {{{ ASMJS_PAGE_SIZE }}};
 
 function alignUp(x, multiple) {
   if (x % multiple > 0) {
@@ -339,21 +339,25 @@ function updateGlobalBufferAndViews(buf) {
   Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-var STATIC_BASE = {{{ GLOBAL_BASE }}},
-    STACK_BASE = {{{ getQuoted('STACK_BASE') }}},
+var STACK_BASE = {{{ getQuoted('STACK_BASE') }}},
     STACKTOP = STACK_BASE,
-    STACK_MAX = {{{ getQuoted('STACK_MAX') }}},
-    DYNAMIC_BASE = {{{ getQuoted('DYNAMIC_BASE') }}},
-    DYNAMICTOP_PTR = {{{ DYNAMICTOP_PTR }}};
+    STACK_MAX = {{{ getQuoted('STACK_MAX') }}};
 
 #if ASSERTIONS
 assert(STACK_BASE % 16 === 0, 'stack must start aligned');
-assert(DYNAMIC_BASE % 16 === 0, 'heap must start aligned');
 #endif
+
+#if RELOCATABLE
+// To support such allocations during startup, track them on __heap_base and
+// then when the main module is loaded it reads that value and uses it to
+// initialize sbrk (the main module is relocatable itself, and so it does not
+// have __heap_base hardcoded into it - it receives it from JS as an extern
+// global, basically).
+Module['___heap_base'] = {{{ getQuoted('HEAP_BASE') }}};
+#endif // RELOCATABLE
 
 #if USE_PTHREADS
 if (ENVIRONMENT_IS_PTHREAD) {
-
   // At the 'load' stage of Worker startup, we are just loading this script
   // but not ready to run yet. At 'run' we receive proper values for the stack
   // etc. and can launch a pthread. Set some fake values there meanwhile to
@@ -361,18 +365,12 @@ if (ENVIRONMENT_IS_PTHREAD) {
 #if ASSERTIONS || STACK_OVERFLOW_CHECK >= 2
   STACK_MAX = STACKTOP = STACK_MAX = 0x7FFFFFFF;
 #endif
-  // TODO DYNAMIC_BASE = Module['DYNAMIC_BASE'];
-  // TODO DYNAMICTOP_PTR = Module['DYNAMICTOP_PTR'];
 }
 #endif
 
 var TOTAL_STACK = {{{ TOTAL_STACK }}};
 #if ASSERTIONS
 if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
-#endif
-#if MAIN_MODULE && !WASM
-// JS side modules use this value to decide their stack size.
-Module['TOTAL_STACK'] = TOTAL_STACK;
 #endif
 
 {{{ makeModuleReceiveWithVar('INITIAL_INITIAL_MEMORY', 'INITIAL_MEMORY', INITIAL_MEMORY) }}}
@@ -406,8 +404,6 @@ if (typeof SharedArrayBuffer === 'undefined' || typeof Atomics === 'undefined') 
 #endif
 #endif
 
-#include "runtime_sab_polyfill.js"
-
 #if STANDALONE_WASM
 #if ASSERTIONS
 // In standalone mode, the wasm creates the memory, and the user can't provide it.
@@ -420,26 +416,6 @@ assert(!Module['wasmMemory']);
 
 #include "runtime_stack_check.js"
 #include "runtime_assertions.js"
-
-function callRuntimeCallbacks(callbacks) {
-  while(callbacks.length > 0) {
-    var callback = callbacks.shift();
-    if (typeof callback == 'function') {
-      callback(Module); // Pass the module as the first argument.
-      continue;
-    }
-    var func = callback.func;
-    if (typeof func === 'number') {
-      if (callback.arg === undefined) {
-        Module['dynCall_v'](func);
-      } else {
-        Module['dynCall_vi'](func, callback.arg);
-      }
-    } else {
-      func(callback.arg === undefined ? null : callback.arg);
-    }
-  }
-}
 
 var __ATPRERUN__  = []; // functions called before the runtime is initialized
 var __ATINIT__    = []; // functions called during startup
@@ -479,6 +455,9 @@ function initRuntime() {
   assert(!runtimeInitialized);
 #endif
   runtimeInitialized = true;
+#if STACK_OVERFLOW_CHECK >= 2
+  Module['___set_stack_limits'](STACK_BASE, STACK_MAX);
+#endif
   {{{ getQuoted('ATINITS') }}}
   callRuntimeCallbacks(__ATINIT__);
 }
@@ -552,11 +531,6 @@ function addOnExit(cb) {
 function addOnPostRun(cb) {
   __ATPOSTRUN__.unshift(cb);
 }
-
-/** @param {number|boolean=} ignore */
-{{{ unSign }}}
-/** @param {number|boolean=} ignore */
-{{{ reSign }}}
 
 #include "runtime_math.js"
 
@@ -663,8 +637,9 @@ function removeRunDependency(id) {
 
 Module["preloadedImages"] = {}; // maps url to image data
 Module["preloadedAudios"] = {}; // maps url to audio data
-#if WASM && MAIN_MODULE
+#if MAIN_MODULE
 Module["preloadedWasm"] = {}; // maps url to wasm instance exports
+addOnPreRun(preloadDylibs);
 #endif
 
 /** @param {string|number=} what */
@@ -691,14 +666,10 @@ function abort(what) {
   what = output;
 #endif // ASSERTIONS
 
-#if WASM
   // Use a wasm runtime error, because a JS error might be seen as a foreign
   // exception, which means we'd run destructors on it. We need the error to
   // simply make the program stop.
   var e = new WebAssembly.RuntimeError(what);
-#else
-  var e = what;
-#endif
 
 #if MODULARIZE
   readyPromiseReject(e);
@@ -708,55 +679,6 @@ function abort(what) {
   // to be thrown when abort is called.
   throw e;
 }
-
-#if RELOCATABLE
-{{{
-(function() {
-  // add in RUNTIME_LINKED_LIBS, if provided
-  if (RUNTIME_LINKED_LIBS.length > 0) {
-    return "if (!Module['dynamicLibraries']) Module['dynamicLibraries'] = [];\n" +
-           "Module['dynamicLibraries'] = " + JSON.stringify(RUNTIME_LINKED_LIBS) + ".concat(Module['dynamicLibraries']);\n";
-  }
-  return '';
-})()
-}}}
-
-addOnPreRun(function() {
-  function loadDynamicLibraries(libs) {
-    if (libs) {
-      libs.forEach(function(lib) {
-        // libraries linked to main never go away
-        loadDynamicLibrary(lib, {global: true, nodelete: true});
-      });
-    }
-  }
-  // if we can load dynamic libraries synchronously, do so, otherwise, preload
-#if WASM
-  if (Module['dynamicLibraries'] && Module['dynamicLibraries'].length > 0 && !readBinary) {
-    // we can't read binary data synchronously, so preload
-    addRunDependency('preload_dynamicLibraries');
-    Promise.all(Module['dynamicLibraries'].map(function(lib) {
-      return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true});
-    })).then(function() {
-      // we got them all, wonderful
-      removeRunDependency('preload_dynamicLibraries');
-    });
-    return;
-  }
-#endif
-  loadDynamicLibraries(Module['dynamicLibraries']);
-});
-
-#if ASSERTIONS
-function lookupSymbol(ptr) { // for a pointer, print out all symbols that resolve to it
-  var ret = [];
-  for (var i in Module) {
-    if (Module[i] === ptr) ret.push(i);
-  }
-  print(ptr + ' is ' + ret);
-}
-#endif
-#endif
 
 var memoryInitializer = null;
 
@@ -784,21 +706,12 @@ Module['FS_createDataFile'] = FS.createDataFile;
 Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
 #endif
 
-#if CYBERDWARF
-var cyberDWARFFile = '{{{ BUNDLED_CD_DEBUG_FILE }}}';
-#endif
-
 #include "URIUtils.js"
 
 #if ASSERTIONS
 function createExportWrapper(name, fixedasm) {
   return function() {
     var displayName = name;
-#if !WASM_BACKEND
-    if (name[0] == '_') {
-      displayName = name.substr(1);
-    }
-#endif
     var asm = fixedasm;
     if (!fixedasm) {
       asm = Module['asm'];
@@ -813,7 +726,83 @@ function createExportWrapper(name, fixedasm) {
 }
 #endif
 
-#if WASM
+#if ABORT_ON_WASM_EXCEPTIONS
+// When DISABLE_EXCEPTION_CATCHING != 1 `abortWrapperDepth` counts the recursion 
+// level of the wrapper function so that we only handle exceptions at the top level
+// letting the exception mechanics work uninterrupted at the inner level.
+// Additionally, `abortWrapperDepth` is also manually incremented in callMain so that 
+// we know to ignore exceptions from there since they're handled by callMain directly.
+var abortWrapperDepth = 0;
+
+// Instrument all the exported functions to:
+// - abort if an unhandled exception occurs
+// - throw an exception if someone tries to call them after the program has aborted
+// See settings.ABORT_ON_WASM_EXCEPTIONS for more info.
+function instrumentWasmExportsWithAbort(exports) {
+  // A cache for wrappers based on the original function reference so we don't end up
+  // creating the same wrappers over and over again
+  var wrapperCache = {};
+  
+  // Creates a wrapper in a closure so that each wrapper gets it's own copy of 'original'
+  var makeWrapper = (function(original) {
+    var wrapper = wrapperCache[original];
+    if (!wrapper) {
+      wrapper = wrapperCache[original] = function() {
+        // Don't allow this function to be called if we're aborted!
+        if (ABORT) {
+          throw "program has already aborted!";
+        }
+        
+#if DISABLE_EXCEPTION_CATCHING != 1
+        abortWrapperDepth += 1;
+#endif
+        try {
+          return original.apply(null, arguments);
+        }
+        catch (e) {
+          if (
+            ABORT // rethrow exception if abort() was called in the original function call above
+            || abortWrapperDepth > 1 // rethrow exceptions not caught at the top level if exception catching is enabled; rethrow from exceptions from within callMain
+#if SUPPORT_LONGJMP
+            || e === 'longjmp' // rethrow longjmp if enabled
+#endif
+          ) {
+            throw e;
+          }
+          
+          abort("unhandled exception: " + [e, e.stack]);
+        }
+#if DISABLE_EXCEPTION_CATCHING != 1
+        finally {
+          abortWrapperDepth -= 1;
+        }
+#endif
+      };
+    }
+    return wrapper;
+  });
+
+  // Override the wasmTable get function to return the wrappers
+  var realGet = wasmTable.get; 
+  wasmTable.get = function(i) { 
+    return makeWrapper(realGet.call(wasmTable, i));
+  };  
+  
+  // Override the exported functions with the wrappers and copy over any other symbols
+  var instExports = {};
+  for (var name in exports) {
+      var original = exports[name];
+      if (typeof original === 'function') {
+        instExports[name] = makeWrapper(original);
+      }
+      else {
+        instExports[name] = original;
+      }
+  }
+  return instExports;
+}
+#endif
+
 var wasmBinaryFile = '{{{ WASM_BINARY_FILE }}}';
 if (!isDataURI(wasmBinaryFile)) {
   wasmBinaryFile = locateFile(wasmBinaryFile);
@@ -865,9 +854,7 @@ function getBinaryPromise() {
     });
   }
   // Otherwise, getBinary should be able to get it synchronously
-  return new Promise(function(resolve, reject) {
-    resolve(getBinary());
-  });
+  return Promise.resolve().then(getBinary);
 }
 
 #if LOAD_SOURCE_MAP
@@ -891,15 +878,6 @@ function createWasm() {
     'env': asmLibraryArg,
     '{{{ WASI_MODULE_NAME }}}': asmLibraryArg
 #endif // MINIFY_WASM_IMPORTED_MODULES
-#if WASM_BACKEND == 0
-    ,
-    'global': {
-      'NaN': NaN,
-      'Infinity': Infinity
-    },
-    'global.Math': Math,
-    'asm2wasm': asm2wasmImports
-#endif
   };
   // Load the wasm module and create an instance of using native support in the JS engine.
   // handle a generated wasm instance, receiving its exports and
@@ -908,10 +886,13 @@ function createWasm() {
   function receiveInstance(instance, module) {
     var exports = instance.exports;
 #if RELOCATABLE
-    exports = relocateExports(exports, GLOBAL_BASE, 0);
+    exports = relocateExports(exports, GLOBAL_BASE);
 #endif
-#if WASM_BACKEND && ASYNCIFY
+#if ASYNCIFY
     exports = Asyncify.instrumentWasmExports(exports);
+#endif
+#if ABORT_ON_WASM_EXCEPTIONS
+    exports = instrumentWasmExportsWithAbort(exports);
 #endif
     Module['asm'] = exports;
 #if !DECLARE_ASM_MODULE_EXPORTS
@@ -924,6 +905,7 @@ function createWasm() {
     // then exported.
     // TODO: do not create a Memory earlier in JS
     wasmMemory = exports['memory'];
+    wasmTable = exports['__indirect_function_table'];
     updateGlobalBufferAndViews(wasmMemory.buffer);
 #if ASSERTIONS
     writeStackCookie();
@@ -1126,7 +1108,7 @@ function createWasm() {
   if (Module['instantiateWasm']) {
     try {
       var exports = Module['instantiateWasm'](info, receiveInstance);
-#if WASM_BACKEND && ASYNCIFY
+#if ASYNCIFY
       exports = Asyncify.instrumentWasmExports(exports);
 #endif
       return exports;
@@ -1150,11 +1132,6 @@ function createWasm() {
   return Module['asm']; // exports were assigned here
 #endif
 }
-#endif
-
-#if WASM && !WASM_BACKEND // fastcomp wasm support: create an asm.js-like function
-Module['asm'] = createWasm;
-#endif
 
 // Globals used by JS i64 conversions
 var tempDouble;

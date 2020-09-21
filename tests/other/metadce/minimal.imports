@@ -1,4 +1,2 @@
-__handle_stack_overflow
-emscripten_resize_heap
+__indirect_function_table
 memory
-table
